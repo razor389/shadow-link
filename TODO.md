@@ -1,10 +1,8 @@
 # TODO
 
-- Add unit tests for `authentication.rs`.
 - Implement logic to handle "find closest node" vs. "find serving node" scenarios.
 - Add unit tests for `node.rs` and `client.rs`.
 - In `client.rs`: Support creating a private address in `new()` and sending messages to Base58-encoded addresses.
-- In `address.rs`: New private addresses should be given a routing prefix or a length that determines a random prefix.
 - Add `address_book.rs` (not yet created) for the client to maintain contact details.
 - Implement periodic node honesty testing by both clients and nodes.
 - Consider adding support for group messages.
@@ -94,7 +92,6 @@ tests/
 
 - **address.rs**:  
   Define `PrivateAddress` and `PublicAddress` and handle routing prefix generation logic.  
-  TODO: Implement prefix or random prefix generation for new private addresses.
 - **message.rs**:  
   Define the `Message` enum or struct to represent all protocol-level messages.
 - **packet.rs**:  
@@ -125,7 +122,6 @@ tests/
 
 ## Testing and Future Work
 
-- Implement additional unit tests for `authentication.rs` and `encryption.rs`.
 - Add tests for client logic (once new address generation and Base58-encoded messaging is implemented).
 - Improve DHT tests to ensure correct node lookups.
 - Periodically test node honesty and consider a mechanism to detect or penalize dishonest nodes.
