@@ -184,7 +184,7 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create recipient private and public addresses
-        let recipient_private_address = PrivateAddress::new(None);
+        let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Original message
@@ -221,11 +221,11 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create intended recipient
-        let intended_recipient_private = PrivateAddress::new(None);
+        let intended_recipient_private = PrivateAddress::new(None, None);
         let intended_recipient_public = intended_recipient_private.public_address.clone();
 
         // Create another (wrong) recipient
-        let other_recipient_private = PrivateAddress::new(None);
+        let other_recipient_private = PrivateAddress::new(None, None);
 
         // Message
         let message = b"Secret message for intended recipient only";
@@ -257,7 +257,7 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create recipient
-        let recipient_private_address = PrivateAddress::new(None);
+        let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         let message = b"Tampering test";
@@ -291,7 +291,7 @@ mod tests {
     fn test_signature_verification_failure() {
         // Create sender and recipient
         let sender_auth = Authentication::new();
-        let recipient_private_address = PrivateAddress::new(None);
+        let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Encrypt the message

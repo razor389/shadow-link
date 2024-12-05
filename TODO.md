@@ -1,6 +1,6 @@
 # TODO
 
-- Add unit tests for `encryption.rs` and `authentication.rs`.
+- Add unit tests for `authentication.rs`.
 - Implement logic to handle "find closest node" vs. "find serving node" scenarios.
 - Add unit tests for `node.rs` and `client.rs`.
 - In `client.rs`: Support creating a private address in `new()` and sending messages to Base58-encoded addresses.
@@ -73,7 +73,7 @@ tests/
 #### `crypto/`
 
 - **authentication.rs**: Handle key generation, signatures, and signature verification.
-- **encryption.rs**: Centralize all encryption-related logic. As per the TODO, roll message encryption currently in `packet.rs` into this file.
+- **encryption.rs**: Centralize all encryption-related logic.
 - **pow.rs**: Implement proof-of-work or memory-hard functions (like Argon2) to prevent spam and ensure resource commitment.
 
 #### `network/`
@@ -98,8 +98,7 @@ tests/
 - **message.rs**:  
   Define the `Message` enum or struct to represent all protocol-level messages.
 - **packet.rs**:  
-  Define `Packet` structures for encapsulating messages with encryption, TTL, and PoW.  
-  TODO: Move encryption-related code into `encryption.rs`.
+  Define `Packet` structures for encapsulating messages with encryption, TTL, and PoW.
 - **node_info.rs**:  
   Store and share node capability data (like supported Argon2 params, POW difficulty).
 - **routing_prefix.rs**:  

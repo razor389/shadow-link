@@ -204,7 +204,7 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create recipient private and public addresses
-        let recipient_private_address = PrivateAddress::new(None);
+        let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Message to send
@@ -257,11 +257,11 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create recipient private and public addresses
-        let intended_recipient_private = PrivateAddress::new(None);
+        let intended_recipient_private = PrivateAddress::new(None, None);
         let intended_recipient_public = intended_recipient_private.public_address.clone();
 
         // Create wrong recipient
-        let wrong_recipient_private = PrivateAddress::new(None);
+        let wrong_recipient_private = PrivateAddress::new(None, None);
 
         // Message to send
         let message = b"Secret message";
@@ -293,7 +293,7 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create recipient private and public addresses
-        let recipient_private_address = PrivateAddress::new(None);
+        let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Message to send
@@ -336,7 +336,7 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create recipient private and public addresses
-        let recipient_private_address = PrivateAddress::new(None);
+        let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Message to send
@@ -372,11 +372,11 @@ mod tests {
         let sender_auth = Authentication::new();
 
         // Create intended recipient
-        let intended_recipient_private = PrivateAddress::new(None);
+        let intended_recipient_private = PrivateAddress::new(None, None);
         let intended_recipient_public = intended_recipient_private.public_address.clone();
 
         // Create another recipient who should not receive the packet
-        let other_recipient_private = PrivateAddress::new(None);
+        let other_recipient_private = PrivateAddress::new(None, None);
 
         // Message to send
         let message = b"Stealth message";

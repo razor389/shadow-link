@@ -7,7 +7,6 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Sha256, Digest};
 use bs58;
 use rand::rngs::OsRng;
-use rand_core::RngCore;
 use std::convert::TryInto;
 use crate::crypto::authentication::Authentication;
 use crate::utils::random_scalar;
@@ -34,29 +33,34 @@ pub struct PrivateAddress {
 
 impl PrivateAddress {
     /// Creates a new private address with an optional prefix
-    pub fn new(prefix: Option<RoutingPrefix>) -> Self {
+    pub fn new(prefix: Option<RoutingPrefix>, length: Option<u8>) -> Self {
         let mut rng = OsRng;
-
-        // Determine the prefix
-        let prefix = prefix.unwrap_or_else(|| {
-            // Generate a random bit length between 1 and 64
-            let bit_length = (rng.next_u32() % 65) as u8;
-            RoutingPrefix::random(bit_length)
-        });
-
-        // Generate random private scalars
+    
+        let prefix = match (prefix, length) {
+            // If a prefix is provided, use it directly
+            (Some(p), _) => p,
+            // If a length is provided but no prefix, generate a random prefix with that length
+            (None, Some(bit_length)) => {
+                assert!(bit_length <= 64, "bit_length must be <= 64");
+                RoutingPrefix::random(bit_length)
+            },
+            // If neither a prefix nor a length is provided, use a zero-length prefix (None prefix)
+            (None, None) => RoutingPrefix::default(),
+        };
+    
+        // Generate random scalars
         let one_time_scalar = random_scalar(&mut rng);
         let encryption_scalar = random_scalar(&mut rng);
-
+    
         // Compute public keys
         let one_time_address = &one_time_scalar * &RISTRETTO_BASEPOINT_POINT;
         let encryption_key = &encryption_scalar * &RISTRETTO_BASEPOINT_POINT;
-
-        // Generate Ed25519 signing key
+    
+        // Generate signing key
         let verification_signing_key = SigningKey::generate(&mut rng);
         let verification_key = verification_signing_key.verifying_key();
         let auth = Authentication::new_from_signing_key(verification_signing_key);
-
+    
         // Calculate checksum
         let checksum = calculate_checksum(
             &prefix,
@@ -64,7 +68,7 @@ impl PrivateAddress {
             &encryption_key,
             &verification_key,
         );
-
+    
         let public_address = PublicAddress {
             prefix,
             one_time_address,
@@ -72,14 +76,14 @@ impl PrivateAddress {
             verification_key,
             checksum,
         };
-
+    
         PrivateAddress {
             one_time_scalar,
             encryption_scalar,
             verification_signing_key: auth,
             public_address,
         }
-    }
+    }    
 }
 
 impl PublicAddress {
@@ -201,14 +205,14 @@ fn calculate_checksum(
 }
 
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_private_address_creation() {
-        let private_address = PrivateAddress::new(None);
+        // Previously: let private_address = PrivateAddress::new(None);
+        let private_address = PrivateAddress::new(None, None);
         let public_address = private_address.public_address.clone();
         assert_eq!(
             &private_address.one_time_scalar * &RISTRETTO_BASEPOINT_POINT,
@@ -226,7 +230,8 @@ mod tests {
 
     #[test]
     fn test_public_address_encoding_decoding() {
-        let private_address = PrivateAddress::new(None);
+        // Previously: let private_address = PrivateAddress::new(None);
+        let private_address = PrivateAddress::new(None, None);
         let public_address = private_address.public_address.clone();
         let encoded = public_address.to_base58();
         let decoded = PublicAddress::from_base58(&encoded).expect("Failed to decode address");
@@ -249,7 +254,8 @@ mod tests {
 
     #[test]
     fn test_invalid_checksum() {
-        let private_address = PrivateAddress::new(None);
+        // Previously: let private_address = PrivateAddress::new(None);
+        let private_address = PrivateAddress::new(None, None);
         let public_address = private_address.public_address.clone();
         let mut encoded = public_address.to_base58();
         // Corrupt the encoding by changing characters
@@ -260,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_routing_prefix_none() {
-        // Create a RoutingPrefix with no bits
+        // This test remains the same since it's not creating a PrivateAddress directly.
         let prefix = RoutingPrefix {
             bit_length: 0,
             bits: None,
@@ -280,7 +286,8 @@ mod tests {
             bit_length: 0,
             bits: None,
         };
-        let private_address = PrivateAddress::new(Some(prefix.clone()));
+        // Previously: let private_address = PrivateAddress::new(Some(prefix.clone()));
+        let private_address = PrivateAddress::new(Some(prefix.clone()), None);
         let public_address = private_address.public_address.clone();
         assert_eq!(public_address.prefix, prefix);
     }
@@ -291,7 +298,8 @@ mod tests {
             bit_length: 0,
             bits: None,
         };
-        let private_address = PrivateAddress::new(Some(prefix.clone()));
+        // Previously: let private_address = PrivateAddress::new(Some(prefix.clone()));
+        let private_address = PrivateAddress::new(Some(prefix.clone()), None);
         let public_address = private_address.public_address.clone();
         let encoded = public_address.to_base58();
         let decoded = PublicAddress::from_base58(&encoded).expect("Failed to decode address");

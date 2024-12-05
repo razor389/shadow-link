@@ -30,12 +30,14 @@ pub struct Client {
 
 impl Client {
     pub fn new(
+        prefix: Option<RoutingPrefix>, 
+        length: Option<u8>,
         max_prefix_length: usize,
         min_argon2_params: SerializableArgon2Params,
         require_exact_argon2: bool,
         bootstrap_node_address: SocketAddr,
     ) -> Self {
-        let private_address = PrivateAddress::new(None);
+        let private_address = PrivateAddress::new(prefix, length);
         info!("Client created with public address {:?}", private_address.public_address);
         let (tx, rx) = mpsc::channel(100);
 
