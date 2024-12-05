@@ -1,6 +1,5 @@
 # TODO
 
-- Redo `encryption.rs` and `packet.rs` to consolidate message encryption functionality into `encryption.rs`.
 - Add unit tests for `encryption.rs` and `authentication.rs`.
 - Implement logic to handle "find closest node" vs. "find serving node" scenarios.
 - Add unit tests for `node.rs` and `client.rs`.

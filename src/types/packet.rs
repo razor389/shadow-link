@@ -1,20 +1,9 @@
 // src/types/packet.rs
 #![allow(non_snake_case)]
-use aes_gcm::{Aes256Gcm, Key, Nonce};
-use aes_gcm::aead::{Aead, KeyInit};
 use bincode;
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::ristretto::CompressedRistretto;
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
-use rand::rngs::OsRng;
-use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha512, Sha256, Digest};
-use std::time::{SystemTime, UNIX_EPOCH};
-use zstd::stream::{decode_all, encode_all};
 use crate::crypto::authentication::Authentication;
-use crate::utils::random_scalar;
+use crate::crypto::encryption::Encryption;
 use crate::types::address::{PublicAddress, PrivateAddress};
 use crate::types::argon2_params::SerializableArgon2Params;
 use crate::crypto::pow::{PoW, PoWAlgorithm};
@@ -96,87 +85,27 @@ impl Packet {
         argon2_params: SerializableArgon2Params,
     ) -> Self {
         info!("Creating signed and encrypted packet");
-
-        let mut rng = OsRng;
-
-        // Generate sender's ephemeral address scalar 'r_a'
-        let r_a_scalar = random_scalar(&mut rng);
-
-        // Generate sender's ephemeral encryption scalar 'r_e'
-        let r_e_scalar = random_scalar(&mut rng);
-
-        // Compute ephemeral public keys
-        let R_a_point = &r_a_scalar * &RISTRETTO_BASEPOINT_POINT;
-        let R_e_point = &r_e_scalar * &RISTRETTO_BASEPOINT_POINT;
-
-        let R_a_bytes = R_a_point.compress().to_bytes();
-        let R_e_bytes = R_e_point.compress().to_bytes();
-
-        // Compute stealth address: P = recipient_encryption_key + H(r_a * recipient_one_time_address) * G
-        let recipient_one_time_point = recipient_address.one_time_address;
-
-        // Compute H_s = H(r_a * recipient_one_time_address)
-        let r_a_times_one_time_point = &r_a_scalar * &recipient_one_time_point;
-        let r_a_times_one_time_bytes = r_a_times_one_time_point.compress().to_bytes();
-        let mut hasher = Sha512::new();
-        hasher.update(r_a_times_one_time_bytes);
-        let H_s_scalar = Scalar::from_hash(hasher);
-
-        // Compute stealth address point
-        let stealth_address_point = recipient_address.encryption_key + &H_s_scalar * &RISTRETTO_BASEPOINT_POINT;
-        let stealth_address_bytes = stealth_address_point.compress().to_bytes();
-
-        // Compute shared secret for encryption key: S_e = r_e * recipient_encryption_key
-        let recipient_encryption_point = recipient_address.encryption_key;
-        let S_e_point = &r_e_scalar * &recipient_encryption_point;
-        let S_e_bytes = S_e_point.compress().to_bytes();
-
-        // Derive encryption key from S_e
-        let encryption_key_hash = Sha256::digest(&S_e_bytes);
-        let encryption_key = encryption_key_hash;
-
-        let key = Key::<Aes256Gcm>::from_slice(&encryption_key);
-        let cipher = Aes256Gcm::new(key);
-
-        // Generate nonce
-        let mut nonce_bytes = [0u8; 12];
-        rng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        // Compress the message
-        let compressed_message = encode_all(&message[..], 0).expect("Failed to compress message");
-
-        // Sign the compressed message
-        let signature = auth.sign_message(&compressed_message).to_bytes().to_vec();
-
-        // Create EncryptedPayload
-        let encrypted_payload = EncryptedPayload {
-            signature,
-            verifying_key: auth.verifying_key().to_bytes(),
-            compressed_message,
-        };
-
-        // Serialize EncryptedPayload
-        let encrypted_payload_bytes = bincode::serialize(&encrypted_payload)
-            .expect("Failed to serialize EncryptedPayload");
-
-        // Encrypt the payload
-        let ciphertext = cipher
-            .encrypt(nonce, encrypted_payload_bytes.as_ref())
-            .expect("Encryption failed");
-
-        // Prepare the Packet data
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+    
+        // Delegate encryption to the Encryption module
+        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address) 
+            = Encryption::encrypt_for_recipient(
+                auth,
+                recipient_address,
+                message
+            );
+    
+        // Now continue with PoW and packet construction as before
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
+    
         let mut packet = Packet {
             routing_prefix: recipient_address.prefix.clone(),
-            ephemeral_address_public_key: R_a_bytes,
-            ephemeral_encryption_public_key: R_e_bytes,
-            stealth_address: stealth_address_bytes,
-            nonce: nonce_bytes,
+            ephemeral_address_public_key,
+            ephemeral_encryption_public_key,
+            stealth_address,
+            nonce,
             ciphertext,
             pow_nonce: 0,
             pow_hash: Vec::new(),
@@ -185,23 +114,20 @@ impl Packet {
             ttl,
             argon2_params: argon2_params.clone(),
         };
-
-        // Perform PoW
+    
+        // Perform PoW as before
         let packet_data = packet.serialize();
         let argon2_params_native = argon2_params.to_argon2_params();
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
             PoWAlgorithm::Argon2id(argon2_params_native),
-        )
-        .unwrap();
-
+        ).unwrap();
+    
         let (pow_hash, pow_nonce) = pow.calculate_pow();
-
-        // Update Packet with PoW results
         packet.pow_nonce = pow_nonce;
         packet.pow_hash = pow_hash;
-
+    
         packet
     }
 
@@ -211,94 +137,36 @@ impl Packet {
         pow_difficulty: usize,
     ) -> Option<(Vec<u8>, [u8; 32])> {
         info!("Verifying and decrypting packet");
-
-        // Verify PoW
+    
+        // 1. Verify PoW as before
         let packet_without_pow = Packet {
             pow_nonce: 0,
             pow_hash: Vec::new(),
             ..self.clone()
         };
-
+    
         let packet_data = packet_without_pow.serialize();
         let argon2_params_native = self.argon2_params.to_argon2_params();
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
             PoWAlgorithm::Argon2id(argon2_params_native),
-        )
-        .unwrap();
-
+        ).unwrap();
+    
         if !pow.verify_pow(&self.pow_hash, self.pow_nonce) {
             return None;
         }
-
-        // Reconstruct ephemeral public keys
-        let R_a_point = CompressedRistretto(self.ephemeral_address_public_key)
-            .decompress()
-            .expect("Invalid ephemeral address public key");
-        let R_e_point = CompressedRistretto(self.ephemeral_encryption_public_key)
-            .decompress()
-            .expect("Invalid ephemeral encryption public key");
-
-        // Compute H_s = H(k_a * R_a)
-        let k_a_scalar = recipient_private_address.one_time_scalar;
-        let k_a_R_a_point = k_a_scalar * R_a_point;
-        let k_a_R_a_bytes = k_a_R_a_point.compress().to_bytes();
-
-        let mut hasher = Sha512::new();
-        hasher.update(k_a_R_a_bytes);
-        let H_s_scalar = Scalar::from_hash(hasher);
-
-        // Compute expected stealth address: P' = R_a + H_s * G
-        let expected_stealth_address_point = recipient_private_address.encryption_scalar * &RISTRETTO_BASEPOINT_POINT + &H_s_scalar * &RISTRETTO_BASEPOINT_POINT;
-        let expected_stealth_address_bytes = expected_stealth_address_point.compress().to_bytes();
-
-        // Check if the stealth address matches
-        if expected_stealth_address_bytes != self.stealth_address {
-            return None; // Packet is not intended for this recipient
-        }
-
-        // Compute shared secret for decryption key: S_e = k_e * R_e
-        let k_e_scalar = recipient_private_address.encryption_scalar;
-        let S_e_point = k_e_scalar * R_e_point;
-        let S_e_bytes = S_e_point.compress().to_bytes();
-
-        // Derive decryption key from S_e
-        let decryption_key_hash = Sha256::digest(&S_e_bytes);
-        let decryption_key = decryption_key_hash;
-
-        let key = Key::<Aes256Gcm>::from_slice(&decryption_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(&self.nonce);
-
-        // Decrypt the payload
-        let decrypted_payload_bytes = cipher.decrypt(nonce, self.ciphertext.as_ref()).ok()?;
-
-        // Deserialize EncryptedPayload
-        let encrypted_payload: EncryptedPayload =
-            bincode::deserialize(&decrypted_payload_bytes).ok()?;
-
-        // Verify the signature
-        let sender_verifying_key =
-            VerifyingKey::from_bytes(&encrypted_payload.verifying_key).ok()?;
-
-        // Convert the signature Vec<u8> to &[u8; 64]
-        let signature_bytes: &[u8; 64] = encrypted_payload.signature.as_slice().try_into().ok()?;
-        let signature = Signature::from_bytes(signature_bytes);
-
-        if sender_verifying_key
-            .verify(&encrypted_payload.compressed_message, &signature)
-            .is_err()
-        {
-            return None; // Signature verification failed
-        }
-        // Decompress the message
-        let decompressed_message =
-            decode_all(&encrypted_payload.compressed_message[..]).ok()?;
-
-        // Return the message and sender's verification key
-        Some((decompressed_message, encrypted_payload.verifying_key))
-    }
+    
+        // 2. Decrypt and verify signature using the Encryption module
+        Encryption::decrypt_for_recipient(
+            &self.ciphertext,
+            &self.nonce,
+            &self.ephemeral_address_public_key,
+            &self.ephemeral_encryption_public_key,
+            &self.stealth_address,
+            recipient_private_address,
+        )
+    }    
 
     pub fn verify_pow(&self, pow_difficulty: usize) -> bool {
         // Reconstruct the packet data without PoW fields
