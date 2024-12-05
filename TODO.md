@@ -1,5 +1,6 @@
 # TODO
 
+- Include full base58 encoded "Sender Public Address" inside packet, instead of just verification key.
 - Implement logic to handle "find closest node" vs. "find serving node" scenarios.
 - Add unit tests for `node.rs` and `client.rs`.
 - In `client.rs`: Support creating a private address in `new()` and sending messages to Base58-encoded addresses.
