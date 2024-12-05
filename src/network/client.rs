@@ -2,25 +2,21 @@
 
 use tokio::sync::{mpsc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use x25519_dalek::PublicKey as X25519PublicKey;
-use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpStream;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use log::{info, warn, error};
-use sha2::{Sha256, Digest};
 
-use crate::crypto::authentication::Authentication;
-use crate::crypto::encryption::Encryption;
 use crate::types::address::{PrivateAddress, PublicAddress};
 use crate::types::argon2_params::SerializableArgon2Params;
+use crate::types::message::Message;
 use crate::types::node_info::NodeInfoExtended;
 use crate::types::packet::Packet;
+use crate::types::routing_prefix::RoutingPrefix;
+
+pub type VerificationKeyBytes = [u8;32];
 
 pub struct Client {
-    auth: Authentication,
-    encryption: Encryption,
-    pub address: PublicAddress,
     private_address: PrivateAddress,
     pub max_prefix_length: usize,
     pub min_argon2_params: SerializableArgon2Params,
@@ -28,34 +24,23 @@ pub struct Client {
     pub connected_node: Option<NodeInfoExtended>,
     pub incoming_tx: mpsc::Sender<Packet>,
     pub incoming_rx: Mutex<mpsc::Receiver<Packet>>,
-    messages_received: Mutex<HashMap<PublicAddress, Vec<Packet>>>,
+    messages_received: Mutex<HashMap<VerificationKeyBytes, Vec<Packet>>>,
     pub bootstrap_node_address: SocketAddr,
 }
 
 impl Client {
     pub fn new(
-        auth: Authentication,
-        encryption: Encryption,
         max_prefix_length: usize,
         min_argon2_params: SerializableArgon2Params,
         require_exact_argon2: bool,
         bootstrap_node_address: SocketAddr,
     ) -> Self {
-        // Compute the client's address by hashing the public keys
-        let mut hasher = Sha256::new();
-        hasher.update(&auth.verifying_key().to_bytes());
-        hasher.update(encryption.permanent_public_key.as_bytes());
-        let result = hasher.finalize();
-        let mut address = [0u8; ADDRESS_LENGTH];
-        address.copy_from_slice(&result[..ADDRESS_LENGTH]);
-
-        info!("Client created with address {:?}", hex::encode(address));
+        let private_address = PrivateAddress::new(None);
+        info!("Client created with public address {:?}", private_address.public_address);
         let (tx, rx) = mpsc::channel(100);
 
         Client {
-            auth,
-            encryption,
-            address,
+            private_address,
             max_prefix_length,
             min_argon2_params,
             require_exact_argon2,
@@ -71,7 +56,7 @@ impl Client {
         // Perform handshake with the bootstrap node
         if let Some(_node_info) = self.handshake_with_node(self.bootstrap_node_address).await {
             // Send FindNodePrefix message with our address prefix
-            let address_prefix = self.get_address_prefix();
+            let address_prefix = self.get_routing_prefix();
             if let Some(nodes) = self.send_find_node_request(self.bootstrap_node_address, address_prefix).await {
                 // Select a node matching our preferences
                 if let Some(best_node) = self.select_best_node(nodes).await {
@@ -136,30 +121,30 @@ impl Client {
         }
     }
 
-    fn get_address_prefix(&self) -> AddressPrefix {
-        AddressPrefix::new(&self.address, self.max_prefix_length)
+    fn get_routing_prefix(&self) -> RoutingPrefix {
+        self.private_address.public_address.prefix
     }
 
     async fn send_find_node_request(
         &self,
         node_address: SocketAddr,
-        address_prefix: AddressPrefix,
+        routing_prefix: RoutingPrefix,
     ) -> Option<Vec<NodeInfoExtended>> {
         // Similar to before, but now we send AddressPrefix instead of Address
         match TcpStream::connect(node_address).await {
             Ok(mut stream) => {
                 // Perform handshake before sending messages
                 if let Some(_node_info) = self.handshake_with_node(node_address).await {
-                    let message = Message::FindNodePrefix(address_prefix.clone());
+                    let message = Message::FindNode(routing_prefix.clone());
                     let data = match bincode::serialize(&message) {
                         Ok(data) => data,
                         Err(e) => {
-                            error!("Failed to serialize FindNodePrefix message: {:?}", e);
+                            error!("Failed to serialize FindNode message: {:?}", e);
                             return None;
                         }
                     };
                     if let Err(e) = stream.write_all(&data).await {
-                        error!("Failed to send FindNodePrefix message: {:?}", e);
+                        error!("Failed to send FindNode message: {:?}", e);
                         return None;
                     }
 
@@ -183,7 +168,7 @@ impl Client {
                     if let Message::NodesExtended(nodes) = response {
                         Some(nodes)
                     } else {
-                        warn!("Unexpected response to FindNodePrefix");
+                        warn!("Unexpected response to FindNode");
                         None
                     }
                 } else {
@@ -201,7 +186,7 @@ impl Client {
     /// Function to handle incoming packets and store them
     pub async fn handle_incoming_packet(&self, packet: Packet) {
         // Attempt to decrypt the packet
-        if let Some((plaintext, sender_address)) = packet.verify_and_decrypt(&self.encryption, packet.pow_difficulty) {
+        if let Some((plaintext, sender_address)) = packet.verify_and_decrypt(&self.private_address, packet.pow_difficulty) {
             // Store the packet
             let mut messages = self.messages_received.lock().await;
             messages
@@ -226,12 +211,10 @@ impl Client {
     }
 
     
-
     /// Send a message to a recipient
     pub async fn send_message(
         &self,
-        recipient_verifying_key: &VerifyingKey,
-        recipient_dh_public_key: &X25519PublicKey,
+        recipient_public_address: PublicAddress,
         message: &[u8],
     ) {
         if let Some(ref connected_node) = self.connected_node {
@@ -240,22 +223,10 @@ impl Client {
             let ttl = connected_node.max_ttl;
             let argon2_params = self.min_argon2_params.max_params(&connected_node.min_argon2_params);
 
-            // Compute the recipient's address
-            let recipient_address = {
-                let mut hasher = Sha256::new();
-                hasher.update(&recipient_verifying_key.to_bytes());
-                hasher.update(recipient_dh_public_key.as_bytes());
-                let result = hasher.finalize();
-                let mut address = [0u8; ADDRESS_LENGTH];
-                address.copy_from_slice(&result[..ADDRESS_LENGTH]);
-                address
-            };
-
+            
             let packet = Packet::create_signed_encrypted(
-                &self.auth,
-                &self.encryption,
-                recipient_dh_public_key,
-                recipient_address,
+                &self.private_address.verification_signing_key,
+                &recipient_public_address,
                 message,
                 pow_difficulty,
                 ttl,
@@ -425,7 +396,7 @@ impl Client {
         }
 
         // Sort nodes by prefix length (longer prefixes first)
-        matching_nodes.sort_by_key(|node| -(node.prefix_length as isize));
+        matching_nodes.sort_by_key(|node| -(node.routing_prefix.bit_length as isize));
 
         // Return the node with the longest matching prefix
         matching_nodes.into_iter().next()

@@ -3,6 +3,7 @@
 use ed25519_dalek::{Signer, Verifier, VerifyingKey, SigningKey, Signature};
 use rand::rngs::OsRng;
 
+#[derive(Debug, Clone)]
 pub struct Authentication {
     pub signing_key: SigningKey,
 }
@@ -12,6 +13,10 @@ impl Authentication {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         Authentication { signing_key }
+    }
+
+    pub fn new_from_signing_key(signing_key: SigningKey) ->Authentication{
+        Authentication{signing_key}
     }
 
     pub fn sign_message(&self, message: &[u8]) -> Signature {

@@ -598,6 +598,7 @@ impl Node {
         }
     }
 
+    #[allow(dead_code)]
     /// Find nodes serving a given prefix
     async fn find_nodes_serving_prefix(&self, address_prefix: &RoutingPrefix) -> Vec<NodeInfoExtended> {
         let routing_table = self.routing_table.lock().await;

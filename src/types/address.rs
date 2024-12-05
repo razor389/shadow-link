@@ -9,6 +9,7 @@ use bs58;
 use rand::rngs::OsRng;
 use rand_core::RngCore;
 use std::convert::TryInto;
+use crate::crypto::authentication::Authentication;
 use crate::utils::random_scalar;
 use crate::types::routing_prefix::RoutingPrefix;
 
@@ -27,7 +28,7 @@ pub struct PublicAddress {
 pub struct PrivateAddress {
     pub one_time_scalar: Scalar,
     pub encryption_scalar: Scalar,
-    pub verification_signing_key: SigningKey,
+    pub verification_signing_key: Authentication,
     pub public_address: PublicAddress,
 }
 
@@ -54,6 +55,7 @@ impl PrivateAddress {
         // Generate Ed25519 signing key
         let verification_signing_key = SigningKey::generate(&mut rng);
         let verification_key = verification_signing_key.verifying_key();
+        let auth = Authentication::new_from_signing_key(verification_signing_key);
 
         // Calculate checksum
         let checksum = calculate_checksum(
@@ -74,7 +76,7 @@ impl PrivateAddress {
         PrivateAddress {
             one_time_scalar,
             encryption_scalar,
-            verification_signing_key,
+            verification_signing_key: auth,
             public_address,
         }
     }
