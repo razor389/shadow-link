@@ -1,5 +1,14 @@
 # TODO
 
+-redo encryption.rs and packet.rs to roll encryption functionality into encryption.rs
+-find closest node vs find serving node messages
+-unit tests for node.rs and client.rs
+-client.rs: private adderss creation in new, send message to base58 encoded address
+-address.rs: new private addresses should be given either a routing prefix, a length (for a random prefix). at some point we can target bandwith usage.
+-address_book.rs for client to be able to keep contact details
+-periodic node honesty testing by client and nodes
+-group messages?
+
 ```plaintext
 bin/
 ├──client.rs 
@@ -14,23 +23,15 @@ src/
 ├── network/
 │   ├── mod.rs              // Network module
 │   ├── node.rs             // Node logic (message hosting/relaying)
-│   ├── relay.rs            // Proof of Relay logic
 │   ├── dht.rs              // Distributed Hash Table (DHT) implementation
-│   ├── routing.rs          // Address-prefix-based routing
-├── storage/
-│   ├── mod.rs              // Storage module
-│   ├── proofs.rs           // Proof of Retrievability logic
-│   ├── storage.rs          // Message storage logic
-├── blockchain/
-│   ├── mod.rs              // Blockchain module
-│   ├── ledger.rs           // Distributed ledger implementation
-│   ├── smart_contracts.rs  // Smart contracts for PoR and PoRelay
+│   ├── client.rs           // Client logic
 ├── types/
 │   ├── mod.rs              // Shared type definitions
-│   ├── address.rs          // ShadowAddress and prefix types 
+│   ├── address.rs          // PrivateAddress and PublicAddress types
+│   ├── message.rs          // Message type  
 │   ├── packet.rs           // Packet structure
-│   ├── proof_types.rs      // Proof of Retrievability and Proof of Relay types
-│   ├── token.rs            // Token and staking-related types
+│   ├── node_info.rs        // NodeInfo and NodeInfoExtended types
+│   ├── routing_prefix.rs   // RoutingPrefix type
 |   ├── argon2_params.rs    // Argon2 proof of memory paramaters
 ├── utils.rs                // Shared utilities (hashing, serialization, etc.)
 ├── config.rs               // Configuration parsing and defaults
