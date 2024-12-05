@@ -17,9 +17,7 @@ use crate::types::node_info::{generate_node_id, NodeId, NodeInfo, NodeInfoExtend
 use crate::types::packet::Packet;
 use crate::types::routing_prefix::RoutingPrefix;
 
-use super::dht::RoutingTable; // Added for timestamp management
-
-
+use super::dht::RoutingTable; 
 
 /// Kademlia Node
 pub struct Node {
