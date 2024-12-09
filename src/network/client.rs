@@ -188,19 +188,26 @@ impl Client {
     /// Function to handle incoming packets and store them
     pub async fn handle_incoming_packet(&self, packet: Packet) {
         // Attempt to decrypt the packet
-        if let Some((plaintext, sender_address)) = packet.verify_and_decrypt(&self.private_address, packet.pow_difficulty) {
-            // Store the packet
-            let mut messages = self.messages_received.lock().await;
-            messages
-                .entry(sender_address)
-                .or_insert_with(Vec::new)
-                .push(packet.clone());
+        // Now verify_and_decrypt returns (plaintext, sender_address_b58)
+        if let Some((plaintext, sender_address_b58)) = packet.verify_and_decrypt(&self.private_address, packet.pow_difficulty) {
+            // Decode sender address and extract verifying key bytes
+            if let Ok(decoded_sender_public_address) = PublicAddress::from_base58(&sender_address_b58) {
+                let sender_verifying_key_bytes = decoded_sender_public_address.verification_key.to_bytes();
 
-            info!(
-                "Stored message from {:?}: {:?}",
-                hex::encode(sender_address),
-                String::from_utf8_lossy(&plaintext)
-            );
+                let mut messages = self.messages_received.lock().await;
+                messages
+                    .entry(sender_verifying_key_bytes)
+                    .or_insert_with(Vec::new)
+                    .push(packet.clone());
+
+                info!(
+                    "Stored message from sender {}: {:?}",
+                    bs58::encode(sender_verifying_key_bytes).into_string(),
+                    String::from_utf8_lossy(&plaintext)
+                );
+            } else {
+                warn!("Failed to decode sender public address from Base58");
+            }
         } else {
             warn!("Failed to decrypt or verify packet");
         }
@@ -225,9 +232,12 @@ impl Client {
             let ttl = connected_node.max_ttl;
             let argon2_params = self.min_argon2_params.max_params(&connected_node.min_argon2_params);
 
-            
+            // Now we must pass the sender's public address to create_signed_encrypted
+            let sender_public_address = &self.private_address.public_address;
+
             let packet = Packet::create_signed_encrypted(
                 &self.private_address.verification_signing_key,
+                sender_public_address,
                 &recipient_public_address,
                 message,
                 pow_difficulty,
@@ -403,5 +413,4 @@ impl Client {
         // Return the node with the longest matching prefix
         matching_nodes.into_iter().next()
     }
-    
 }

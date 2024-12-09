@@ -1,12 +1,11 @@
 // src/crypto/encryption.rs
-
 #![allow(non_snake_case)]
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
 use bincode;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Verifier};
 use rand::rngs::OsRng;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
@@ -20,17 +19,18 @@ use crate::utils::random_scalar;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EncryptedPayload {
     pub signature: Vec<u8>,
-    pub verifying_key: [u8; 32], // Sender's verification key
+    pub sender_address: String, // Base58-encoded sender public address
     pub compressed_message: Vec<u8>,
 }
 
 pub struct Encryption;
 
 impl Encryption {
-    /// Encrypt and sign a message for the recipient, returning ciphertext,
-    /// nonce, ephemeral public keys, and stealth address.
+    /// Encrypt and sign a message for the recipient.
+    /// Now requires the sender's public address, so we can embed it as Base58 in the payload.
     pub fn encrypt_for_recipient(
         auth: &Authentication,
+        sender_public_address: &PublicAddress,
         recipient_address: &PublicAddress,
         message: &[u8],
     ) -> (
@@ -84,12 +84,15 @@ impl Encryption {
         // Compress message
         let compressed_message = encode_all(message, 0).expect("Failed to compress message");
 
-        // Sign
+        // Sign message
         let signature = auth.sign_message(&compressed_message).to_bytes().to_vec();
+
+        // Encode sender public address as Base58
+        let sender_address_b58 = sender_public_address.to_base58();
 
         let encrypted_payload = EncryptedPayload {
             signature,
-            verifying_key: auth.verifying_key().to_bytes(),
+            sender_address: sender_address_b58,
             compressed_message,
         };
 
@@ -109,6 +112,7 @@ impl Encryption {
     }
 
     /// Decrypt and verify the packet ciphertext and signature.
+    /// Returns (decrypted_message, sender_address_b58).
     pub fn decrypt_for_recipient(
         ciphertext: &[u8],
         nonce: &[u8; 12],
@@ -116,7 +120,7 @@ impl Encryption {
         ephemeral_encryption_public_key: &[u8; 32],
         stealth_address: &[u8; 32],
         recipient_private_address: &PrivateAddress,
-    ) -> Option<(Vec<u8>, [u8; 32])> {
+    ) -> Option<(Vec<u8>, String)> {
         // Reconstruct points
         let R_a_point = curve25519_dalek::ristretto::CompressedRistretto(*ephemeral_address_public_key)
             .decompress()?;
@@ -157,7 +161,11 @@ impl Encryption {
 
         let encrypted_payload: EncryptedPayload = bincode::deserialize(&decrypted_payload_bytes).ok()?;
 
-        let sender_verifying_key = VerifyingKey::from_bytes(&encrypted_payload.verifying_key).ok()?;
+        // Decode sender address from Base58
+        let decoded_sender_public_address = PublicAddress::from_base58(&encrypted_payload.sender_address).ok()?;
+
+        // Verify signature using the decoded sender's public address
+        let sender_verifying_key = decoded_sender_public_address.verification_key;
 
         let signature_bytes: &[u8; 64] = encrypted_payload.signature.as_slice().try_into().ok()?;
         let signature = Signature::from_bytes(signature_bytes);
@@ -168,7 +176,8 @@ impl Encryption {
 
         let decompressed_message = decode_all(&encrypted_payload.compressed_message[..]).ok()?;
 
-        Some((decompressed_message, encrypted_payload.verifying_key))
+        // Return the decompressed message and the sender's Base58-encoded address
+        Some((decompressed_message, encrypted_payload.sender_address))
     }
 }
 
@@ -176,24 +185,27 @@ impl Encryption {
 mod tests {
     use super::*;
     use crate::crypto::authentication::Authentication;
-    use crate::types::address::PrivateAddress;
+    use crate::types::address::{PrivateAddress, PublicAddress};
 
     #[test]
     fn test_encrypt_decrypt_round_trip() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        // Create sender private/public addresses and auth
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create recipient private and public addresses
+        // Create recipient private/public addresses
         let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Original message
         let message = b"Hello, encryption test!";
 
-        // Encrypt the message for the recipient
-        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address)
-            = Encryption::encrypt_for_recipient(
+        // Encrypt the message for the recipient, now including sender's public address
+        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address) =
+            Encryption::encrypt_for_recipient(
                 &sender_auth,
+                &sender_public_address,
                 &recipient_public_address,
                 message,
             );
@@ -209,31 +221,40 @@ mod tests {
         );
 
         assert!(decrypted.is_some(), "Failed to decrypt");
-        let (decrypted_message, sender_verifying_key) = decrypted.unwrap();
+        let (decrypted_message, sender_address_string) = decrypted.unwrap();
 
         assert_eq!(decrypted_message, message);
-        assert_eq!(sender_verifying_key, sender_auth.verifying_key().to_bytes());
+
+        // Decode the sender's public address from Base58 and verify the keys match
+        let decoded_sender_public_address = PublicAddress::from_base58(&sender_address_string)
+            .expect("Failed to decode sender's public address");
+
+        assert_eq!(
+            decoded_sender_public_address.verification_key.to_bytes(),
+            sender_auth.verifying_key().to_bytes()
+        );
     }
 
     #[test]
     fn test_wrong_recipient_cannot_decrypt() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        // Create sender
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create intended recipient
+        // Create intended recipient and a wrong recipient
         let intended_recipient_private = PrivateAddress::new(None, None);
         let intended_recipient_public = intended_recipient_private.public_address.clone();
-
-        // Create another (wrong) recipient
         let other_recipient_private = PrivateAddress::new(None, None);
 
         // Message
         let message = b"Secret message for intended recipient only";
 
         // Encrypt for intended recipient
-        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address)
-            = Encryption::encrypt_for_recipient(
+        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address) =
+            Encryption::encrypt_for_recipient(
                 &sender_auth,
+                &sender_public_address,
                 &intended_recipient_public,
                 message,
             );
@@ -253,19 +274,21 @@ mod tests {
 
     #[test]
     fn test_tampered_ciphertext_fails_decryption() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        // Create sender and recipient
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create recipient
         let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         let message = b"Tampering test";
 
         // Encrypt
-        let (mut ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address)
-            = Encryption::encrypt_for_recipient(
+        let (mut ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address) =
+            Encryption::encrypt_for_recipient(
                 &sender_auth,
+                &sender_public_address,
                 &recipient_public_address,
                 message,
             );
@@ -290,36 +313,27 @@ mod tests {
     #[test]
     fn test_signature_verification_failure() {
         // Create sender and recipient
-        let sender_auth = Authentication::new();
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
+
         let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
         // Encrypt the message
         let message = b"Check signature";
-        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address)
-            = Encryption::encrypt_for_recipient(
+        let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address) =
+            Encryption::encrypt_for_recipient(
                 &sender_auth,
+                &sender_public_address,
                 &recipient_public_address,
                 message,
             );
 
-        // Now we create a new sender auth that doesn't match the signature
+        // Create a fake sender auth with a different key
         let fake_sender_auth = Authentication::new();
 
-        // Manually attempt to decrypt by forging a payload that doesn't match the intended signature
-        // To simulate this, we can't easily re-sign the ciphertext without breaking it,
-        // but we can attempt to verify using a mismatched key scenario:
-        // We'll just assert that a mismatch would fail. In practice, this test is best done
-        // by tampering with the encrypted payload or verifying directly with a known bad signature.
-        //
-        // Since the encryption code does not expose a direct way to replace the signature,
-        // we rely on the `verify()` call inside `decrypt_for_recipient` to fail if not correct.
-
-        // Decrypting with the correct keys (no tampering) should still give us the correct message
-        // since we are not actually forging the signature in this example test.
-        // Let's simulate by just checking that the verifying_key matches the sender_auth key,
-        // and that if we replaced it with `fake_sender_auth`, it wouldn't match.
-
+        // Decryption with correct keys (no tampering) should work
         let result = Encryption::decrypt_for_recipient(
             &ciphertext,
             &nonce,
@@ -330,11 +344,17 @@ mod tests {
         );
 
         assert!(result.is_some(), "Should decrypt correctly with original sender");
-        let (decrypted_message, sender_key) = result.unwrap();
+        let (decrypted_message, sender_address_string) = result.unwrap();
         assert_eq!(decrypted_message, message);
-        assert_eq!(sender_key, sender_auth.verifying_key().to_bytes());
 
-        // Now, check that the sender key does not match a different auth key
-        assert_ne!(sender_key, fake_sender_auth.verifying_key().to_bytes(), "Keys should not match");
+        // Decode the sender address and verify the verifying key matches the original sender
+        let decoded_sender_public_address = PublicAddress::from_base58(&sender_address_string)
+            .expect("Failed to decode sender's public address");
+        let original_sender_key = decoded_sender_public_address.verification_key.to_bytes();
+
+        assert_eq!(original_sender_key, sender_auth.verifying_key().to_bytes());
+
+        // Now, check that this key does not match the fake sender auth key
+        assert_ne!(original_sender_key, fake_sender_auth.verifying_key().to_bytes(), "Keys should not match");
     }
 }

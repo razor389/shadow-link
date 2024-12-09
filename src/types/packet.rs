@@ -30,13 +30,6 @@ pub struct Packet {
     pub argon2_params: SerializableArgon2Params,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EncryptedPayload {
-    pub signature: Vec<u8>,
-    pub verifying_key: [u8; 32], // Sender's verification key
-    pub compressed_message: Vec<u8>,
-}
-
 impl Packet {
     pub fn new(
         routing_prefix: RoutingPrefix,
@@ -76,8 +69,10 @@ impl Packet {
         bincode::deserialize(data).expect("Failed to deserialize packet")
     }
 
+    /// Create a signed, encrypted packet. Now requires the sender's public address so we can embed it.
     pub fn create_signed_encrypted(
         auth: &Authentication,
+        sender_public_address: &PublicAddress,
         recipient_address: &PublicAddress,
         message: &[u8],
         pow_difficulty: usize,
@@ -86,15 +81,15 @@ impl Packet {
     ) -> Self {
         info!("Creating signed and encrypted packet");
     
-        // Delegate encryption to the Encryption module
+        // Encrypt for recipient, embedding sender's address in the payload
         let (ciphertext, nonce, ephemeral_address_public_key, ephemeral_encryption_public_key, stealth_address) 
             = Encryption::encrypt_for_recipient(
                 auth,
+                sender_public_address,
                 recipient_address,
                 message
             );
     
-        // Now continue with PoW and packet construction as before
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -115,7 +110,7 @@ impl Packet {
             argon2_params: argon2_params.clone(),
         };
     
-        // Perform PoW as before
+        // Perform PoW
         let packet_data = packet.serialize();
         let argon2_params_native = argon2_params.to_argon2_params();
         let pow = PoW::new(
@@ -131,14 +126,15 @@ impl Packet {
         packet
     }
 
+    /// Verify and decrypt the packet, returning the decrypted message and the sender's Base58-encoded public address
     pub fn verify_and_decrypt(
         &self,
         recipient_private_address: &PrivateAddress,
         pow_difficulty: usize,
-    ) -> Option<(Vec<u8>, [u8; 32])> {
+    ) -> Option<(Vec<u8>, String)> {
         info!("Verifying and decrypting packet");
     
-        // 1. Verify PoW as before
+        // Verify PoW
         let packet_without_pow = Packet {
             pow_nonce: 0,
             pow_hash: Vec::new(),
@@ -157,7 +153,7 @@ impl Packet {
             return None;
         }
     
-        // 2. Decrypt and verify signature using the Encryption module
+        // Decrypt and verify signature
         Encryption::decrypt_for_recipient(
             &self.ciphertext,
             &self.nonce,
@@ -169,7 +165,6 @@ impl Packet {
     }    
 
     pub fn verify_pow(&self, pow_difficulty: usize) -> bool {
-        // Reconstruct the packet data without PoW fields
         let packet_without_pow = Packet {
             pow_nonce: 0,
             pow_hash: Vec::new(),
@@ -194,14 +189,16 @@ impl Packet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::authentication::Authentication;
     use crate::types::address::PrivateAddress;
     use crate::types::argon2_params::SerializableArgon2Params;
+    use crate::types::address::PublicAddress;
 
     #[test]
     fn test_packet_creation_and_decryption() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        // Create sender private/public addresses and auth
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
         // Create recipient private and public addresses
         let recipient_private_address = PrivateAddress::new(None, None);
@@ -215,9 +212,10 @@ mod tests {
         let ttl = 3600; // 1 hour
         let argon2_params = SerializableArgon2Params::default();
 
-        // Create packet
+        // Create packet (now requires sender's public address as well)
         let packet = Packet::create_signed_encrypted(
             &sender_auth,
+            &sender_public_address,
             &recipient_public_address,
             message,
             pow_difficulty,
@@ -238,12 +236,18 @@ mod tests {
         );
 
         // Verify and decrypt
-        if let Some((decrypted_message, sender_verifying_key_bytes)) =
+        if let Some((decrypted_message, sender_address_string)) =
             deserialized_packet.verify_and_decrypt(&recipient_private_address, pow_difficulty)
         {
             assert_eq!(message.to_vec(), decrypted_message);
+
+            // Decode the sender's public address from Base58
+            let decoded_sender_public_address = PublicAddress::from_base58(&sender_address_string)
+                .expect("Failed to decode sender public address");
+
+            // Compare verification keys
             assert_eq!(
-                sender_verifying_key_bytes,
+                decoded_sender_public_address.verification_key.to_bytes(),
                 sender_auth.verifying_key().to_bytes()
             );
         } else {
@@ -253,27 +257,24 @@ mod tests {
 
     #[test]
     fn test_wrong_recipient_cannot_decrypt() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create recipient private and public addresses
         let intended_recipient_private = PrivateAddress::new(None, None);
         let intended_recipient_public = intended_recipient_private.public_address.clone();
 
-        // Create wrong recipient
         let wrong_recipient_private = PrivateAddress::new(None, None);
 
-        // Message to send
         let message = b"Secret message";
 
-        // PoW parameters
         let pow_difficulty = 1;
         let ttl = 3600;
         let argon2_params = SerializableArgon2Params::default();
 
-        // Create packet intended for the intended recipient
         let packet = Packet::create_signed_encrypted(
             &sender_auth,
+            &sender_public_address,
             &intended_recipient_public,
             message,
             pow_difficulty,
@@ -281,32 +282,28 @@ mod tests {
             argon2_params,
         );
 
-        // Wrong recipient attempts to decrypt
         let result = packet.verify_and_decrypt(&wrong_recipient_private, pow_difficulty);
-
         assert!(result.is_none(), "Wrong recipient should not decrypt the packet");
     }
 
     #[test]
     fn test_signature_verification_failure() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create recipient private and public addresses
         let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
-        // Message to send
         let message = b"Important message";
 
-        // PoW parameters
         let pow_difficulty = 1;
         let ttl = 3600;
         let argon2_params = SerializableArgon2Params::default();
 
-        // Create packet
         let mut packet = Packet::create_signed_encrypted(
             &sender_auth,
+            &sender_public_address,
             &recipient_public_address,
             message,
             pow_difficulty,
@@ -314,42 +311,35 @@ mod tests {
             argon2_params,
         );
 
-        // Tamper with the signature
+        // Tamper with the ciphertext
         let mut decrypted_payload_bytes = packet.ciphertext.clone();
-
-        // Flip a bit in the ciphertext to simulate tampering
         if let Some(byte) = decrypted_payload_bytes.get_mut(0) {
             *byte ^= 0x01;
         }
-
         packet.ciphertext = decrypted_payload_bytes;
 
-        // Attempt to verify and decrypt
         let result = packet.verify_and_decrypt(&recipient_private_address, pow_difficulty);
-
         assert!(result.is_none(), "Tampered packet should fail verification");
     }
 
     #[test]
     fn test_invalid_pow_rejection() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create recipient private and public addresses
         let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
 
-        // Message to send
         let message = b"Test message";
 
-        // PoW parameters
         let pow_difficulty = 1;
         let ttl = 3600;
         let argon2_params = SerializableArgon2Params::default();
 
-        // Create packet
         let mut packet = Packet::create_signed_encrypted(
             &sender_auth,
+            &sender_public_address,
             &recipient_public_address,
             message,
             pow_difficulty,
@@ -360,35 +350,30 @@ mod tests {
         // Tamper with the PoW nonce
         packet.pow_nonce += 1;
 
-        // Attempt to verify and decrypt
         let result = packet.verify_and_decrypt(&recipient_private_address, pow_difficulty);
-
         assert!(result.is_none(), "Packet with invalid PoW should be rejected");
     }
 
     #[test]
     fn test_stealth_address_mismatch() {
-        // Create sender authentication
-        let sender_auth = Authentication::new();
+        let sender_private_address = PrivateAddress::new(None, None);
+        let sender_public_address = sender_private_address.public_address.clone();
+        let sender_auth = sender_private_address.verification_signing_key.clone();
 
-        // Create intended recipient
         let intended_recipient_private = PrivateAddress::new(None, None);
         let intended_recipient_public = intended_recipient_private.public_address.clone();
 
-        // Create another recipient who should not receive the packet
         let other_recipient_private = PrivateAddress::new(None, None);
 
-        // Message to send
         let message = b"Stealth message";
 
-        // PoW parameters
         let pow_difficulty = 1;
         let ttl = 3600;
         let argon2_params = SerializableArgon2Params::default();
 
-        // Create packet intended for the intended recipient
         let packet = Packet::create_signed_encrypted(
             &sender_auth,
+            &sender_public_address,
             &intended_recipient_public,
             message,
             pow_difficulty,
@@ -396,9 +381,7 @@ mod tests {
             argon2_params,
         );
 
-        // Other recipient attempts to verify and decrypt
         let result = packet.verify_and_decrypt(&other_recipient_private, pow_difficulty);
-
         assert!(
             result.is_none(),
             "Recipient with mismatching stealth address should not decrypt the packet"
