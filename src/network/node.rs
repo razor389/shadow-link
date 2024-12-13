@@ -484,6 +484,15 @@ impl Node {
 
     /// Handle a Packet message
     async fn handle_packet(&self, packet: Packet, sender_address: SocketAddr) {
+        // Step 0: Check if we've already processed this packet
+        {
+            let store = self.packet_store.lock().await;
+            if store.contains_key(&packet.pow_hash) {
+                // We've already processed this exact packet. Skip.
+                info!("Duplicate packet received from {} - ignoring.", sender_address);
+                return;
+            }
+        }
         // Step 1: Verify TTL
         if packet.ttl > self.max_ttl {
             warn!(

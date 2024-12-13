@@ -5,7 +5,6 @@
 - Add `address_book.rs` (not yet created) for the client to maintain contact details.
 - Implement periodic node honesty testing by both clients and nodes.
 - Consider adding support for group messages.
-- Ensure that nodes forward messages efficiently (to other nodes and subscribers), without redundancy (check pow hash and don't forward if already present - hence already forwarded)
 
 ---
 
