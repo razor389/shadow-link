@@ -1,6 +1,5 @@
 # TODO
 
-- Implement logic to handle "find closest node" vs. "find serving node" scenarios.
 - Add unit tests for `node.rs` and `client.rs`.
 - Add `address_book.rs` (not yet created) for the client to maintain contact details.
 - Implement periodic node honesty testing by both clients and nodes.

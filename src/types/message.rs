@@ -6,7 +6,10 @@ use super::{node_info::{NodeInfo, NodeInfoExtended}, packet::Packet, routing_pre
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message {
-    FindNode(RoutingPrefix),                // Find nodes closest to a given RoutingPrefix
+    /// Find nodes closest to a given RoutingPrefix, returns Message::Nodes
+    FindClosestNodes(RoutingPrefix),
+    /// Find nodes that serve (match) a given RoutingPrefix, returns Message::NodesExtended
+    FindServingNodes(RoutingPrefix),
     Nodes(Vec<NodeInfo>),                   // Response containing a list of NodeInfo
     NodesExtended(Vec<NodeInfoExtended>),   // Response with extended node info
     Packet(Packet),                         // A packet sent between nodes or to clients

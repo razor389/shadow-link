@@ -1,6 +1,6 @@
 // src/network/node.rs
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -8,7 +8,7 @@ use tokio::sync::broadcast::{self, Sender as BroadcastSender};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use log::{info, warn, error};
-use tokio::time::{Duration, Instant};
+use tokio::time::{sleep, Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::argon2_params::SerializableArgon2Params;
@@ -36,6 +36,7 @@ pub struct Node {
     pub cleanup_interval: Duration, 
     pub blacklist_duration: Duration,
     pub node_requirements: Arc<Mutex<HashMap<NodeId, NodeInfoExtended>>>,
+    pub node_discovery_interval: Duration,
 }
 
 pub enum NetworkMessage {
@@ -54,6 +55,7 @@ impl Node {
         cleanup_interval: Duration, 
         blacklist_duration: Duration,
         bootstrap_nodes: Vec<SocketAddr>,
+        node_discovery_interval: Duration,
     ) -> Arc<Self> {
         let id = generate_node_id(&address, &prefix);
 
@@ -74,6 +76,7 @@ impl Node {
             cleanup_interval,
             blacklist_duration,
             node_requirements: Arc::new(Mutex::new(HashMap::new())),
+            node_discovery_interval,
         });
 
         let node_clone = node.clone();
@@ -93,6 +96,19 @@ impl Node {
             for bootstrap_addr in bootstrap_nodes {
                 node_clone.bootstrap(bootstrap_addr).await;
             }
+            // After bootstrapping all nodes, perform iterative discovery using its own prefix
+            let own_prefix = node_clone.prefix;
+            let discovered_nodes = node_clone.iterative_find_nodes(own_prefix).await;
+            
+            // Update routing table with discovered nodes to ensure they're integrated
+            for node_info in discovered_nodes.iter() {
+                node_clone.update_routing_table(node_info.clone()).await;
+            }
+
+            info!("After bootstrap, discovered {} nodes closer to our own prefix", discovered_nodes.len());
+
+            // Start periodic find nodes task
+            node_clone.start_periodic_find_nodes().await;
         });
 
         node
@@ -230,6 +246,159 @@ impl Node {
         }
     }
 
+    /// Periodic task that picks random prefixes of the same bit_length as our own prefix
+    /// and performs iterative find nodes to refresh and expand the routing table.
+    async fn start_periodic_find_nodes(self: Arc<Self>) {
+        let bit_length = self.prefix.bit_length;
+        let interval = self.node_discovery_interval;
+        tokio::spawn(async move {
+            loop {
+                sleep(interval).await;
+
+                // Generate a random prefix with the same bit_length as our own prefix
+                let random_prefix = RoutingPrefix::random(bit_length);
+
+                info!("Performing periodic iterative_find_nodes for prefix {:?}", random_prefix);
+                let discovered = self.iterative_find_nodes(random_prefix).await;
+
+                // Integrate discovered nodes into routing table
+                for node_info in discovered.iter() {
+                    self.update_routing_table(node_info.clone()).await;
+                }
+
+                info!("Periodic find nodes: discovered {} nodes for random prefix", discovered.len());
+            }
+        });
+    }
+
+    /// Iterative find nodes method:
+    /// Given a target_prefix, repeatedly queries the closest known nodes
+    /// to find ever-closer nodes until no progress is made or a limit is reached.
+    pub async fn iterative_find_nodes(&self, target_prefix: RoutingPrefix) -> Vec<NodeInfo> {
+        // Start with the closest nodes we know from our own routing table
+        let mut closest_nodes = self.find_closest_nodes(&target_prefix).await;
+
+        // A set to avoid querying the same node multiple times
+        let mut queried = HashSet::new();
+
+        let max_iterations = 5; // Limit the number of iterations to prevent infinite loops
+        let mut iteration = 0;
+
+        loop {
+            iteration += 1;
+            if iteration > max_iterations {
+                info!("Reached maximum iterations for iterative_find_nodes");
+                break;
+            }
+
+            let mut made_progress = false;
+
+            // Attempt to query each node in closest_nodes that we haven't queried yet
+            for node in closest_nodes.clone() {
+                if queried.contains(&node.id) {
+                    continue; // Already queried this node
+                }
+
+                // Mark as queried
+                queried.insert(node.id);
+
+                // Attempt a query
+                if let Some(new_nodes) = self.query_for_closest_nodes(&target_prefix, node.address).await {
+                    // Incorporate new nodes into closest_nodes if they are closer
+                    let original_len = closest_nodes.len();
+                    // Insert new nodes and resort
+                    closest_nodes.extend(new_nodes);
+                    closest_nodes.sort_by_key(|n| n.routing_prefix.xor_distance(&target_prefix));
+                    closest_nodes.truncate(20); // K = 20
+
+                    if closest_nodes.len() > original_len {
+                        made_progress = true;
+                    }
+                }
+            }
+
+            // If no progress was made in this iteration, we're done
+            if !made_progress {
+                break;
+            }
+        }
+
+        closest_nodes
+    }
+
+    /// Attempts to connect to a node, handshake, send a FindClosestNodes request, and return the nodes it provides.
+    async fn query_for_closest_nodes(&self, target_prefix: &RoutingPrefix, node_address: SocketAddr) -> Option<Vec<NodeInfo>> {
+        // Check if node is blacklisted
+        if self.is_blacklisted(&node_address.ip()).await {
+            return None;
+        }
+
+        // Attempt to connect
+        let mut stream = match TcpStream::connect(node_address).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to connect to {}: {:?}", node_address, e);
+                return None;
+            }
+        };
+
+        // Perform handshake
+        if self.send_handshake(&mut stream).await.is_err() {
+            warn!("Failed to send handshake to {}", node_address);
+            return None;
+        }
+        if self.receive_handshake_ack(&mut stream).await.is_err() {
+            warn!("Failed to receive handshake ack from {}", node_address);
+            return None;
+        }
+
+        // Send FindClosestNodes request
+        let request = Message::FindClosestNodes(*target_prefix);
+        let data = match bincode::serialize(&request) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Serialization error: {:?}", e);
+                return None;
+            }
+        };
+
+        if let Err(e) = stream.write_all(&data).await {
+            warn!("Failed to send FindClosestNodes to {}: {:?}", node_address, e);
+            return None;
+        }
+
+        let mut buffer = vec![0u8; 8192];
+        let n = match stream.read(&mut buffer).await {
+            Ok(n) if n == 0 => {
+                // Connection closed
+                return None;
+            }
+            Ok(n) => n,
+            Err(e) => {
+                warn!("Failed to read from {}: {:?}", node_address, e);
+                return None;
+            }
+        };
+
+        let message: Message = match bincode::deserialize(&buffer[..n]) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Deserialization error from {}: {:?}", node_address, e);
+                return None;
+            }
+        };
+
+        if let Message::Nodes(nodes) = message {
+            // Update our routing table with these nodes
+            for node_info in &nodes {
+                self.update_routing_table(node_info.clone()).await;
+            }
+            Some(nodes)
+        } else {
+            None
+        }
+    }
+
     async fn send_handshake(&self, stream: &mut TcpStream) -> io::Result<()> {
         let handshake = Message::Handshake(self.get_node_info_extended());
         let data = bincode::serialize(&handshake).map_err(|e| {
@@ -255,7 +424,7 @@ impl Node {
     }
 
     async fn find_node_request(&self, stream: &mut TcpStream) -> io::Result<()> {
-        let find_node = Message::FindNode(self.prefix);
+        let find_node = Message::FindClosestNodes(self.prefix);
         let data = bincode::serialize(&find_node).map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("Serialization error: {:?}", e))
         })?;
@@ -403,9 +572,18 @@ impl Node {
     /// Handle an incoming message
     async fn handle_message(&self, message: Message, sender_address: SocketAddr) {
         match message {
-            Message::FindNode(target_id) => {
-                let closest_nodes = self.find_closest_nodes(&target_id).await;
+            Message::FindClosestNodes(target_prefix) => {
+                let closest_nodes = self.find_closest_nodes(&target_prefix).await;
                 let response = Message::Nodes(closest_nodes);
+                self.send_message(response, sender_address).await;
+            }
+            Message::FindServingNodes(target_prefix) => {
+                // Get nodes serving this prefix
+                let mut serving_nodes = self.find_nodes_serving_prefix(&target_prefix).await;
+                // Sort by prefix length descending if necessary
+                serving_nodes.sort_by_key(|node| -(node.routing_prefix.bit_length as isize));
+        
+                let response = Message::NodesExtended(serving_nodes);
                 self.send_message(response, sender_address).await;
             }
             Message::Nodes(nodes) => {
@@ -605,7 +783,6 @@ impl Node {
         }
     }
 
-    #[allow(dead_code)]
     /// Find nodes serving a given prefix
     async fn find_nodes_serving_prefix(&self, address_prefix: &RoutingPrefix) -> Vec<NodeInfoExtended> {
         let routing_table = self.routing_table.lock().await;

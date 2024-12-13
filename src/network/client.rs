@@ -59,7 +59,7 @@ impl Client {
         if let Some(_node_info) = self.handshake_with_node(self.bootstrap_node_address).await {
             // Send FindNodePrefix message with our address prefix
             let address_prefix = self.get_routing_prefix();
-            if let Some(nodes) = self.send_find_node_request(self.bootstrap_node_address, address_prefix).await {
+            if let Some(nodes) = self.send_find_serving_nodes_request(self.bootstrap_node_address, address_prefix).await {
                 // Select a node matching our preferences
                 if let Some(best_node) = self.select_best_node(nodes).await {
                     // Handshake and subscribe to the selected node
@@ -127,30 +127,23 @@ impl Client {
         self.private_address.public_address.prefix
     }
 
-    async fn send_find_node_request(
+    async fn send_find_serving_nodes_request(
         &self,
         node_address: SocketAddr,
         routing_prefix: RoutingPrefix,
     ) -> Option<Vec<NodeInfoExtended>> {
-        // Similar to before, but now we send AddressPrefix instead of Address
         match TcpStream::connect(node_address).await {
             Ok(mut stream) => {
                 // Perform handshake before sending messages
                 if let Some(_node_info) = self.handshake_with_node(node_address).await {
-                    let message = Message::FindNode(routing_prefix.clone());
-                    let data = match bincode::serialize(&message) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            error!("Failed to serialize FindNode message: {:?}", e);
-                            return None;
-                        }
-                    };
+                    let message = Message::FindServingNodes(routing_prefix);
+                    let data = bincode::serialize(&message).expect("Failed to serialize message");
+    
                     if let Err(e) = stream.write_all(&data).await {
-                        error!("Failed to send FindNode message: {:?}", e);
+                        error!("Failed to send FindServingNodes message: {:?}", e);
                         return None;
                     }
-
-                    // Receive NodesExtended response
+    
                     let mut buffer = vec![0u8; 8192];
                     let n = match stream.read(&mut buffer).await {
                         Ok(n) => n,
@@ -159,22 +152,15 @@ impl Client {
                             return None;
                         }
                     };
-                    let response: Message = match bincode::deserialize(&buffer[..n]) {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            error!("Failed to deserialize NodesExtended response: {:?}", e);
-                            return None;
-                        }
-                    };
-
-                    if let Message::NodesExtended(nodes) = response {
+    
+                    if let Ok(Message::NodesExtended(nodes)) = bincode::deserialize(&buffer[..n]) {
                         Some(nodes)
                     } else {
-                        warn!("Unexpected response to FindNode");
+                        warn!("Unexpected response to FindServingNodes");
                         None
                     }
                 } else {
-                    error!("Failed to handshake with node during FindNodePrefix");
+                    error!("Failed to handshake with node during FindServingNodes");
                     None
                 }
             }
@@ -184,6 +170,7 @@ impl Client {
             }
         }
     }
+    
     
     /// Function to handle incoming packets and store them
     pub async fn handle_incoming_packet(&self, packet: Packet) {
