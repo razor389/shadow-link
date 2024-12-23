@@ -60,6 +60,10 @@ impl Node {
         let id = generate_node_id(&address, &prefix);
 
         let (network_tx, network_rx) = mpsc::channel(100);
+        
+        // Wrap the receiver in an Arc<Mutex<_>>.
+        let network_rx = Arc::new(Mutex::new(network_rx));
+        
         let node = Arc::new(Node {
             id,
             prefix: prefix.clone(),
@@ -68,7 +72,7 @@ impl Node {
             packet_store: Arc::new(Mutex::new(HashMap::new())),
             blacklist: Arc::new(Mutex::new(HashMap::new())),
             network_tx,
-            network_rx: Arc::new(Mutex::new(network_rx)),
+            network_rx,
             pow_difficulty,
             subscribers: Arc::new(Mutex::new(HashMap::new())),
             max_ttl,
@@ -120,13 +124,16 @@ impl Node {
         let listener = TcpListener::bind(self.address).await.expect("Failed to bind");
         info!("Node {} listening on {}", hex::encode(self.id), self.address);
 
+        // Clone the network_tx for the incoming connection handler
+        let network_tx = self.network_tx.clone();
+
         // Spawn task to accept incoming connections
-        let node_clone = self.clone();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        let _ = node_clone.network_tx.send(NetworkMessage::Incoming { stream }).await;
+                        // Use the cloned network_tx to send incoming connections.
+                        let _ = network_tx.send(NetworkMessage::Incoming { stream }).await;
                     }
                     Err(e) => {
                         error!("Failed to accept connection: {:?}", e);
@@ -135,8 +142,11 @@ impl Node {
             }
         });
 
+        // Get the shared network_rx from self.
+        let mut network_rx = self.network_rx.lock().await;
+
         // Handle network messages
-        while let Some(message) = self.network_rx.lock().await.recv().await {
+        while let Some(message) = network_rx.recv().await {
             match message {
                 NetworkMessage::Incoming { stream } => {
                     // Handle incoming connection
@@ -551,6 +561,10 @@ impl Node {
                                 }
                                 break;
                             }
+                            Message::Ping => {
+                                let response = Message::Pong;
+                                self.send_message(response, sender_address).await;
+                            }
                             _ => {
                                 self.handle_message(message, sender_address).await;
                             }
@@ -710,10 +724,12 @@ impl Node {
 
     /// Determine if the node should store the packet based on its prefix
     fn should_store_packet(&self, recipient_prefix: &RoutingPrefix) -> bool {
-        if self.prefix.serves(recipient_prefix){
-            return true;
-        }
-        false
+        let should_store = self.prefix.serves(recipient_prefix);
+        info!(
+            "Node prefix: {:?}, Recipient prefix: {:?}, Should store: {}",
+            self.prefix, recipient_prefix, should_store
+        );
+        should_store
     }
 
     /// Store a packet and notify subscribers
@@ -924,3 +940,153 @@ impl Node {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::authentication::Authentication;
+    use crate::types::address::{PrivateAddress, PublicAddress};
+    use crate::types::message::Message;
+    use crate::types::packet::Packet;
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use tokio::net::TcpStream;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn test_node_initialization() {
+        let prefix = RoutingPrefix::random(8);
+        let address = "127.0.0.1:8080".parse().unwrap();
+        let pow_difficulty = 1;
+        let max_ttl = 3600;
+        let min_argon2_params = SerializableArgon2Params::default();
+        let cleanup_interval = Duration::from_secs(60);
+        let blacklist_duration = Duration::from_secs(600);
+        let node_discovery_interval = Duration::from_secs(3600);
+        let bootstrap_nodes = Vec::new();
+
+        let node = Node::new(
+            prefix,
+            address,
+            pow_difficulty,
+            max_ttl,
+            min_argon2_params,
+            cleanup_interval,
+            blacklist_duration,
+            bootstrap_nodes,
+            node_discovery_interval,
+        )
+        .await;
+
+        assert_eq!(node.address, address);
+        assert_eq!(node.pow_difficulty, pow_difficulty);
+    }
+
+    #[tokio::test]
+    async fn test_send_message_to_node() {
+        // Start a simple node
+        let addr = SocketAddr::from_str("127.0.0.1:8081").unwrap();
+        let prefix = RoutingPrefix::random(8);
+        let node = Node::new(
+            prefix,
+            addr,
+            1, // pow_difficulty
+            86400, // max_ttl
+            SerializableArgon2Params::default(),
+            Duration::from_secs(300), // cleanup_interval
+            Duration::from_secs(600), // blacklist_duration
+            Vec::new(), // bootstrap_nodes
+            Duration::from_secs(3600), // node_discovery_interval
+        )
+        .await;
+
+        // Create a TCP stream to send a message
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Perform Handshake
+        let handshake = Message::Handshake(node.get_node_info_extended());
+        let data = bincode::serialize(&handshake).unwrap();
+        stream.write_all(&data).await.unwrap();
+
+        // Receive HandshakeAck
+        let mut buffer = vec![0; 4096];
+        let n = stream.read(&mut buffer).await.unwrap();
+        let _response: Message = bincode::deserialize(&buffer[..n]).unwrap();
+
+        // Serialize and send a Ping message
+        let message = Message::Ping;
+        let data = bincode::serialize(&message).unwrap();
+        stream.write_all(&data).await.unwrap();
+
+        // Read response from the node
+        let mut buffer = vec![0; 1024];
+        let n = stream.read(&mut buffer).await.unwrap();
+        let response: Message = bincode::deserialize(&buffer[..n]).unwrap();
+
+        // Check if the response is a Pong message
+        assert!(matches!(response, Message::Pong));
+    }
+
+    #[tokio::test]
+    async fn test_send_and_receive_packet() {
+        let node_addr = SocketAddr::from_str("127.0.0.1:8082").unwrap();
+        let node_prefix = RoutingPrefix { bit_length: 8, bits: Some(0b11001010) };
+
+        let node = Node::new(
+            node_prefix,
+            node_addr,
+            1, // Simplified PoW difficulty
+            3600,
+            SerializableArgon2Params::default(),
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+            Vec::new(),
+            Duration::from_secs(3600),
+        )
+        .await;
+
+        // Create a test packet
+        let sender_auth = Authentication::new();
+        let recipient_private_address = PrivateAddress::new(Some(RoutingPrefix { bit_length: 8, bits: Some(0b11001010) }), None);
+        let recipient_public_address = recipient_private_address.public_address.clone();
+        let sender_public_address = PublicAddress {
+            prefix: RoutingPrefix::random(8),
+            one_time_address: recipient_public_address.one_time_address,
+            encryption_key: recipient_public_address.encryption_key,
+            verification_key: sender_auth.verifying_key(),
+            checksum: [0u8; 4],
+        };
+
+        let message = b"Test packet message".to_vec();
+        let packet = Packet::create_signed_encrypted(
+            &sender_auth,
+            &sender_public_address,
+            &recipient_public_address,
+            &message,
+            node.pow_difficulty,
+            node.max_ttl,
+            node.min_argon2_params,
+        );
+
+        // Perform Handshake
+        let mut stream = TcpStream::connect(node_addr).await.unwrap();
+        let handshake = Message::Handshake(node.get_node_info_extended());
+        let data = bincode::serialize(&handshake).unwrap();
+        stream.write_all(&data).await.unwrap();
+
+        // Receive HandshakeAck
+        let mut buffer = vec![0; 4096];
+        let n = stream.read(&mut buffer).await.unwrap();
+        let _response: Message = bincode::deserialize(&buffer[..n]).unwrap();
+
+        // Serialize and send the packet
+        let data = bincode::serialize(&Message::Packet(packet.clone())).unwrap();
+        stream.write_all(&data).await.unwrap();
+
+        // Allow some time for the node to process the packet
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Check if the packet was stored
+        let packet_store = node.packet_store.lock().await;
+        assert!(packet_store.contains_key(&packet.pow_hash));
+    }
+}

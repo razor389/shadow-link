@@ -401,3 +401,136 @@ impl Client {
         matching_nodes.into_iter().next()
     }
 }
+
+// src/network/client.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::address::PrivateAddress;
+    use crate::types::argon2_params::SerializableArgon2Params;
+    use crate::types::routing_prefix::RoutingPrefix;
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use crate::network::node::Node;
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn test_client_creation() {
+        let bootstrap_addr = SocketAddr::from_str("127.0.0.1:8083").unwrap();
+        let client = Client::new(
+            None,
+            None,
+            64,
+            SerializableArgon2Params::default(),
+            false,
+            bootstrap_addr,
+        );
+
+        assert!(client.connected_node.is_none());
+        assert_eq!(client.max_prefix_length, 64);
+    }
+
+    #[tokio::test]
+    async fn test_client_handshake() {
+        // Start a simple node
+        let node_addr = SocketAddr::from_str("127.0.0.1:8084").unwrap();
+        let node_prefix = RoutingPrefix::random(8);
+        let _node = Node::new(
+            node_prefix,
+            node_addr,
+            10,
+            86400,
+            SerializableArgon2Params::default(),
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+            Vec::new(),
+            Duration::from_secs(3600),
+        )
+        .await;
+
+        // Create a client
+        let client = Client::new(
+            None,
+            None,
+            64,
+            SerializableArgon2Params::default(),
+            false,
+            node_addr,
+        );
+
+        // Perform handshake
+        let node_info = client.handshake_with_node(node_addr).await;
+        assert!(node_info.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_send_message_to_node_and_receive() {
+        // Start a simple node
+        let node_addr = SocketAddr::from_str("127.0.0.1:8085").unwrap();
+        let node_prefix = RoutingPrefix::random(8);
+        let _node = Node::new(
+            node_prefix,
+            node_addr,
+            1,  // Simplified PoW difficulty for testing
+            86400,
+            SerializableArgon2Params::default(),
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+            Vec::new(),
+            Duration::from_secs(3600),
+        )
+        .await;
+    
+        // Create a client
+        let mut client = Client::new(
+            None,
+            None,
+            64,
+            SerializableArgon2Params::default(),
+            false,
+            node_addr,
+        );
+    
+        // Perform handshake
+        let node_info = client.handshake_with_node(node_addr).await;
+        assert!(node_info.is_some());
+    
+        // Subscribe to the node
+        client.subscribe_and_receive_messages(node_addr).await;
+    
+        // Create a recipient for the message
+        let recipient_private_address = PrivateAddress::new(None, None);
+        let recipient_public_address = recipient_private_address.public_address.clone();
+    
+        // Create and send a packet
+        let message = b"Test message".to_vec();
+        client.connected_node = node_info;
+        client.send_message(recipient_public_address, &message).await;
+    
+        // Wait for the message to be processed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    
+        // Check if the message was received
+        let received_packets = client.messages_received.lock().await;
+        assert!(!received_packets.is_empty());
+    
+        // Verify the content of the received message
+        let mut message_found = false;
+        for (_, packets) in received_packets.iter() {
+            for packet in packets {
+                if let Some((decrypted_message, _)) = packet.verify_and_decrypt(&client.private_address, 1) {
+                    if decrypted_message == message {
+                        message_found = true;
+                        break;
+                    }
+                }
+            }
+            if message_found {
+                break;
+            }
+        }
+        assert!(message_found, "Message not received or not decrypted correctly");
+    }
+    
+}
