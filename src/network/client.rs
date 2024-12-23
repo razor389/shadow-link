@@ -407,7 +407,6 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::PrivateAddress;
     use crate::types::argon2_params::SerializableArgon2Params;
     use crate::types::routing_prefix::RoutingPrefix;
     use std::net::SocketAddr;
@@ -466,71 +465,80 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_to_node_and_receive() {
-        // Start a simple node
-        let node_addr = SocketAddr::from_str("127.0.0.1:8085").unwrap();
-        let node_prefix = RoutingPrefix::random(8);
+        use std::net::SocketAddr;
+        use std::str::FromStr;
+        use tokio::time::Duration;
+
+        use crate::network::node::Node;
+        use crate::network::client::Client;
+        use crate::types::argon2_params::SerializableArgon2Params;
+        use crate::types::routing_prefix::RoutingPrefix;
+        use crate::types::address::PrivateAddress;
+
+        // 1) Use a zero-length prefix for the node so it "serves all" addresses:
+        let node_prefix = RoutingPrefix { bit_length: 0, bits: None };
+        let node_addr = SocketAddr::from_str("127.0.0.1:8082").unwrap();
+
+        // 2) Create and run the node
         let _node = Node::new(
             node_prefix,
             node_addr,
-            1,  // Simplified PoW difficulty for testing
-            86400,
+            1,  // PoW difficulty
+            3600, // max_ttl
             SerializableArgon2Params::default(),
-            Duration::from_secs(300),
-            Duration::from_secs(600),
-            Vec::new(),
-            Duration::from_secs(3600),
+            Duration::from_secs(300), // cleanup_interval
+            Duration::from_secs(600), // blacklist_duration
+            Vec::new(), // no bootstrap nodes
+            Duration::from_secs(3600), // node_discovery_interval
         )
         .await;
-    
-        // Create a client
+
+        // 3) Create a client
         let mut client = Client::new(
-            None,
-            None,
-            64,
+            None, // no prefix
+            None, // no length
+            64,   // max_prefix_length
             SerializableArgon2Params::default(),
-            false,
-            node_addr,
+            false, // require_exact_argon2
+            node_addr, // bootstrap_node_address
         );
-    
-        // Perform handshake
+
+        // 4) Handshake
         let node_info = client.handshake_with_node(node_addr).await;
-        assert!(node_info.is_some());
-    
-        // Subscribe to the node
+        assert!(node_info.is_some(), "Handshake failed");
+        
+        // 5) Subscribe to the node
         client.subscribe_and_receive_messages(node_addr).await;
-    
-        // Create a recipient for the message
+
+        // 6) Send a test message to *any* recipient
         let recipient_private_address = PrivateAddress::new(None, None);
         let recipient_public_address = recipient_private_address.public_address.clone();
-    
-        // Create and send a packet
-        let message = b"Test message".to_vec();
-        client.connected_node = node_info;
-        client.send_message(recipient_public_address, &message).await;
-    
-        // Wait for the message to be processed
+
+        let test_message = b"Hello from client test!".to_vec();
+        client.connected_node = node_info; // store the node info so `client.send_message` uses it
+
+        // Actually send it
+        client.send_message(recipient_public_address, &test_message).await;
+
+        // 7) Wait briefly for the node to store + broadcast
         tokio::time::sleep(Duration::from_millis(100)).await;
-    
-        // Check if the message was received
-        let received_packets = client.messages_received.lock().await;
-        assert!(!received_packets.is_empty());
-    
-        // Verify the content of the received message
-        let mut message_found = false;
-        for (_, packets) in received_packets.iter() {
+
+        // 8) Check that the client actually received the packet
+        let received_packets_map = client.messages_received.lock().await;
+        assert!(!received_packets_map.is_empty(), "No messages received at client");
+
+        // And optionally confirm the plaintext matches:
+        let mut found = false;
+        for packets in received_packets_map.values() {
             for packet in packets {
-                if let Some((decrypted_message, _)) = packet.verify_and_decrypt(&client.private_address, 1) {
-                    if decrypted_message == message {
-                        message_found = true;
+                if let Some((plaintext, _)) = packet.verify_and_decrypt(&client.private_address, 1) {
+                    if plaintext == test_message {
+                        found = true;
                         break;
                     }
                 }
             }
-            if message_found {
-                break;
-            }
         }
-        assert!(message_found, "Message not received or not decrypted correctly");
+        assert!(found, "Never received the expected message via subscription");
     }
-    
 }

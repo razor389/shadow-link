@@ -563,7 +563,13 @@ impl Node {
                             }
                             Message::Ping => {
                                 let response = Message::Pong;
-                                self.send_message(response, sender_address).await;
+
+                                // **Directly write back** to the same connection:
+                                let data = bincode::serialize(&response)
+                                    .expect("Failed to serialize Message::Pong");
+                                if let Err(e) = stream.write_all(&data).await {
+                                    error!("Failed to write Pong to stream: {:?}", e);
+                                }
                             }
                             _ => {
                                 self.handle_message(message, sender_address).await;
