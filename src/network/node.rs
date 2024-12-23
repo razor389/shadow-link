@@ -632,35 +632,49 @@ impl Node {
     /// Handle a Subscribe message
     async fn handle_subscribe(self: Arc<Self>, sender_address: SocketAddr, mut stream: TcpStream) {
         let (tx, mut rx) = broadcast::channel::<Packet>(100);
-
+    
         {
             let mut subscribers = self.subscribers.lock().await;
             subscribers.insert(sender_address, tx.clone());
         }
-
+    
         info!("Client {} subscribed", sender_address);
-
+    
         // Send all stored packets to the subscriber
         let packets = {
             let store = self.packet_store.lock().await;
             store.values().cloned().collect::<Vec<Packet>>()
         };
-
+    
+        // Send each stored packet
         for packet in packets {
-            let _ = tx.send(packet);
+            let message = Message::Packet(packet.clone());
+            if let Ok(data) = bincode::serialize(&message) {
+                if let Err(e) = stream.write_all(&data).await {
+                    error!("Failed to send stored packet to subscriber: {:?}", e);
+                    break;
+                }
+            }
         }
-
-        // Continuously send new packets to the subscriber
+    
+        // Continuously receive and forward new packets
         let self_clone = self.clone();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(packet) => {
                         let message = Message::Packet(packet);
-                        let data = bincode::serialize(&message).expect("Failed to serialize message");
-                        if let Err(e) = stream.write_all(&data).await {
-                            error!("Failed to send message to subscriber: {:?}", e);
-                            break;
+                        match bincode::serialize(&message) {
+                            Ok(data) => {
+                                if let Err(e) = stream.write_all(&data).await {
+                                    error!("Failed to send message to subscriber: {:?}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to serialize packet message: {:?}", e);
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
@@ -669,7 +683,7 @@ impl Node {
                     }
                 }
             }
-
+    
             // Remove subscriber when done
             {
                 let mut subscribers = self_clone.subscribers.lock().await;
@@ -720,6 +734,7 @@ impl Node {
 
         // Step 4: Store the packet if we should
         if self.should_store_packet(&packet.routing_prefix) {
+            info!("Storing packet for prefix {:?}", packet.routing_prefix);
             self.store_packet(packet.clone()).await; // Clone because we'll use it later
             info!("Stored packet on node {}", hex::encode(self.id));
         }
@@ -740,16 +755,26 @@ impl Node {
 
     /// Store a packet and notify subscribers
     async fn store_packet(&self, packet: Packet) {
+        info!("Storing and broadcasting packet");
+        
+        // First store the packet
         {
             let mut store = self.packet_store.lock().await;
             store.insert(packet.pow_hash.clone(), packet.clone());
         }
 
-        // Notify subscribers about the new packet
+        // Then notify all subscribers
         let subscribers = self.subscribers.lock().await;
-        for subscriber in subscribers.iter() {
-            let _ = subscriber.1.send(packet.clone());
+        info!("Broadcasting to {} subscribers", subscribers.len());
+        
+        for (subscriber_addr, tx) in subscribers.iter() {
+            info!("Broadcasting packet to subscriber {}", subscriber_addr);
+            if let Err(e) = tx.send(packet.clone()) {
+                warn!("Failed to send packet to subscriber {}: {:?}", subscriber_addr, e);
+            }
         }
+        
+        info!("Packet stored and broadcast completed");
     }
 
     /// Forward a packet to nodes whose routing prefixes serve the packet's routing prefix
