@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use log::{info, warn, error};
+use log::{debug, error, info, warn};
 
 use crate::types::address::{PrivateAddress, PublicAddress};
 use crate::types::argon2_params::SerializableArgon2Params;
@@ -206,8 +206,6 @@ impl Client {
         rx.recv().await
     }
 
-    
-    /// Send a message to a recipient
     pub async fn send_message(
         &self,
         recipient_public_address: PublicAddress,
@@ -219,7 +217,6 @@ impl Client {
             let ttl = connected_node.max_ttl;
             let argon2_params = self.min_argon2_params.max_params(&connected_node.min_argon2_params);
 
-            // Now we must pass the sender's public address to create_signed_encrypted
             let sender_public_address = &self.private_address.public_address;
 
             let packet = Packet::create_signed_encrypted(
@@ -232,25 +229,45 @@ impl Client {
                 argon2_params,
             );
 
-            // Send the packet to the connected node
-            let message = Message::Packet(packet);
-            self.send_message_to_node(message, connected_node.address).await;
-        } else {
-            error!("No connected node to send the message through");
-        }
-    }
+            // Connect and handshake with node
+            match TcpStream::connect(connected_node.address).await {
+                Ok(mut stream) => {
+                    // Perform handshake first
+                    info!("Performing handshake before sending message");
+                    let handshake = Message::ClientHandshake;
+                    if let Ok(data) = bincode::serialize(&handshake) {
+                        if let Err(e) = stream.write_all(&data).await {
+                            error!("Failed to send handshake: {:?}", e);
+                            return;
+                        }
 
-    async fn send_message_to_node(&self, message: Message, node_address: SocketAddr) {
-        match TcpStream::connect(node_address).await {
-            Ok(mut stream) => {
-                let data = bincode::serialize(&message).expect("Failed to serialize message");
-                if let Err(e) = stream.write_all(&data).await {
-                    error!("Failed to send message to {}: {:?}", node_address, e);
+                        // Await handshake response
+                        let mut buffer = vec![0u8; 8192];
+                        match stream.read(&mut buffer).await {
+                            Ok(n) => {
+                                if let Ok(Message::ClientHandshakeAck(_)) = bincode::deserialize(&buffer[..n]) {
+                                    info!("Handshake successful, sending message");
+                                    // Now send the packet
+                                    let message = Message::Packet(packet);
+                                    if let Ok(data) = bincode::serialize(&message) {
+                                        if let Err(e) = stream.write_all(&data).await {
+                                            error!("Failed to send message: {:?}", e);
+                                        }
+                                    }
+                                } else {
+                                    error!("Unexpected handshake response");
+                                }
+                            }
+                            Err(e) => error!("Failed to read handshake response: {:?}", e),
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to connect to node {}: {:?}", connected_node.address, e);
                 }
             }
-            Err(e) => {
-                error!("Failed to connect to node {}: {:?}", node_address, e);
-            }
+        } else {
+            error!("No connected node to send the message through");
         }
     }
 
@@ -295,84 +312,107 @@ impl Client {
     }
 
     pub async fn subscribe_and_receive_messages(&self, node_address: SocketAddr) {
+        info!("Attempting to subscribe to node {}", node_address);
+        
         // Connect to the node
         match TcpStream::connect(node_address).await {
-            Ok(stream) => {
-                // Perform handshake before subscribing
-                if let Some(_node_info) = self.handshake_with_node(node_address).await {
-                    // Send a Subscribe message
-                    let message = Message::Subscribe;
-                    let data = match bincode::serialize(&message) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            error!("Failed to serialize Subscribe message: {:?}", e);
-                            return;
-                        }
-                    };
-
-                    let (mut read_half, mut write_half) = stream.into_split();
-
-                    // Write to the stream using the write half
-                    if let Err(e) = write_half.write_all(&data).await {
-                        error!("Failed to send Subscribe message: {:?}", e);
+            Ok(mut stream) => {
+                // First perform handshake
+                info!("Connected to node, performing handshake");
+                let handshake = Message::ClientHandshake;
+                let data = match bincode::serialize(&handshake) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("Failed to serialize handshake: {:?}", e);
                         return;
                     }
+                };
 
-                    // Use the client's incoming_tx to send packets received from the node
-                    let message_tx = self.incoming_tx.clone();
+                if let Err(e) = stream.write_all(&data).await {
+                    error!("Failed to send handshake: {:?}", e);
+                    return;
+                }
 
-                    // Spawn a task to read from the stream and send messages to the channel
-                    let node_address_clone = node_address;
-                    tokio::spawn(async move {
-                        let mut buffer = vec![0u8; 8192];
-                        loop {
-                            match read_half.read(&mut buffer).await {
-                                Ok(0) => {
-                                    // Connection closed
-                                    info!("Connection closed by node {}", node_address_clone);
-                                    break;
-                                }
-                                Ok(n) => {
-                                    if let Ok(message) = bincode::deserialize::<Message>(&buffer[..n]) {
-                                        match message {
-                                            Message::Packet(packet) => {
-                                                if let Err(e) = message_tx.send(packet).await {
-                                                    error!("Failed to send packet to client's incoming_rx: {:?}", e);
-                                                    break;
-                                                }
-                                            }
-                                            Message::UnsubscribeAck => {
-                                                info!("Unsubscribed from node {}", node_address_clone);
-                                            }
-                                            _ => {
-                                                // Handle other messages if necessary
-                                            }
-                                        }
-                                    } else {
-                                        error!("Failed to deserialize message from node {}", node_address_clone);
+                // Wait for handshake acknowledgment
+                let mut buffer = vec![0u8; 8192];
+                let n = match stream.read(&mut buffer).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!("Failed to read handshake response: {:?}", e);
+                        return;
+                    }
+                };
+
+                let handshake_response = match bincode::deserialize::<Message>(&buffer[..n]) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error!("Failed to deserialize handshake response: {:?}", e);
+                        return;
+                    }
+                };
+
+                if !matches!(handshake_response, Message::ClientHandshakeAck(_)) {
+                    error!("Unexpected handshake response");
+                    return;
+                }
+
+                info!("Handshake completed, sending subscription request");
+
+                // Send subscription message
+                let subscribe_msg = Message::Subscribe;
+                let data = match bincode::serialize(&subscribe_msg) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("Failed to serialize Subscribe message: {:?}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) = stream.write_all(&data).await {
+                    error!("Failed to send Subscribe message: {:?}", e);
+                    return;
+                }
+
+                info!("Subscription request sent, starting message loop");
+
+                // Main message loop
+                loop {
+                    let mut buffer = vec![0u8; 8192];
+                    match stream.read(&mut buffer).await {
+                        Ok(0) => {
+                            info!("Connection closed by node");
+                            break;
+                        }
+                        Ok(n) => {
+                            match bincode::deserialize::<Message>(&buffer[..n]) {
+                                Ok(Message::Packet(packet)) => {
+                                    info!("Received packet from node");
+                                    if let Err(e) = self.incoming_tx.send(packet).await {
+                                        error!("Failed to forward packet to handler: {:?}", e);
                                     }
+                                }
+                                Ok(_) => {
+                                    debug!("Received non-packet message");
                                 }
                                 Err(e) => {
-                                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                                        info!("Connection closed by node {}", node_address_clone);
-                                    } else {
-                                        error!("Failed to read from node {}: {:?}", node_address_clone, e);
-                                    }
-                                    break;
+                                    error!("Failed to deserialize message: {:?}", e);
                                 }
                             }
                         }
-                    });
-                } else {
-                    error!("Failed to handshake with node {}", node_address);
+                        Err(e) => {
+                            error!("Error reading from stream: {:?}", e);
+                            break;
+                        }
+                    }
                 }
+                info!("Subscription message loop ended");
             }
             Err(e) => {
                 error!("Failed to connect to node {}: {:?}", node_address, e);
             }
         }
     }
-    
+            
     async fn select_best_node(
         &self,
         nodes: Vec<NodeInfoExtended>,
@@ -408,8 +448,8 @@ mod tests {
     use crate::types::routing_prefix::RoutingPrefix;
     use std::net::SocketAddr;
     use std::str::FromStr;
+    use std::sync::Arc;
     use crate::network::node::Node;
-    use tokio::sync::oneshot;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -463,6 +503,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_clients_send_and_receive_message() {
+        use log::{info, warn};
+
+        // Initialize logging for the test
+        let _ = env_logger::try_init();
+        info!("Starting two clients test");
+
         // --- Node Setup ---
         let node_prefix = RoutingPrefix {
             bit_length: 0,
@@ -470,6 +516,7 @@ mod tests {
         };
         let node_addr = SocketAddr::from_str("127.0.0.1:8085").unwrap();
 
+        info!("Creating node...");
         let _node = Node::new(
             node_prefix,
             node_addr,
@@ -483,7 +530,12 @@ mod tests {
         )
         .await;
 
-        // --- Client 1 (Sender) Setup ---
+        // Give node more time to start
+        info!("Waiting for node to initialize...");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // --- Client Setup ---
+        info!("Creating clients...");
         let mut client1 = Client::new(
             None,
             None,
@@ -493,7 +545,6 @@ mod tests {
             node_addr,
         );
 
-        // --- Client 2 (Receiver) Setup ---
         let mut client2 = Client::new(
             None,
             None,
@@ -503,72 +554,97 @@ mod tests {
             node_addr,
         );
 
-        // --- Handshake (Both Clients) ---
-        let node_info_client1 = client1.handshake_with_node(node_addr).await;
-        assert!(node_info_client1.is_some(), "Client 1 handshake failed");
-        client1.connected_node = node_info_client1;
+        // --- Connect Clients ---
+        info!("Connecting client 1...");
+        let client1_handshake = tokio::time::timeout(
+            Duration::from_secs(5),
+            client1.handshake_with_node(node_addr)
+        ).await.expect("Client 1 handshake timeout")
+        .expect("Client 1 handshake failed");
+        client1.connected_node = Some(client1_handshake);
+        info!("Client 1 connected successfully");
 
-        let node_info_client2 = client2.handshake_with_node(node_addr).await;
-        assert!(node_info_client2.is_some(), "Client 2 handshake failed");
-        client2.connected_node = node_info_client2;
+        info!("Connecting client 2...");
+        let client2_handshake = tokio::time::timeout(
+            Duration::from_secs(5),
+            client2.handshake_with_node(node_addr)
+        ).await.expect("Client 2 handshake timeout")
+        .expect("Client 2 handshake failed");
+        client2.connected_node = Some(client2_handshake);
+        info!("Client 2 connected successfully");
 
-        // --- Subscribe and Receive (Client 2) ---
-        let (tx, rx) = oneshot::channel();
-        let client2_clone = std::sync::Arc::new(tokio::sync::Mutex::new(client2));
-        let client2_clone_for_task = client2_clone.clone();
-
-        let receive_task = tokio::spawn(async move {
-            let client2_guard = client2_clone_for_task.lock().await;
-            client2_guard.subscribe_and_receive_messages(node_addr).await;
-            let _ = tx.send(()); // Signal that subscription has started
-
-            // Continuously receive packets
-            loop {
-                // Use timeout for receiving each packet
-                if let Ok(Some(packet)) = tokio::time::timeout(Duration::from_millis(100), client2_guard.receive_packet()).await {
-                    client2_guard.handle_incoming_packet(packet).await;
-                } else {
-                    // Handle timeout - possibly log or check for other conditions
-                    continue; // Continue the loop after a timeout
-                }
-            }
-        });
-
-        // Wait for subscribe_and_receive_messages to start or timeout
-        tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .expect("Timeout waiting for client 2 to start subscribing")
-            .unwrap();
-
-        // --- Send Message (Client 1 to Client 2) ---
-        let test_message = b"Hello from Client 1!".to_vec();
-        let recipient_public_address;
+        // Store client2's address and private address before wrapping
+        let recipient_public_address = client2.private_address.public_address.clone();
+        let client2_private_address = client2.private_address.clone();
+        
+        // --- Subscribe Client 2 ---
+        info!("Starting Client 2 subscription...");
+        let client2 = Arc::new(tokio::sync::Mutex::new(client2));
+        
+        // Subscribe client 2
         {
-            let client2_guard = client2_clone.lock().await;
-            recipient_public_address = client2_guard.private_address.public_address.clone();
+            let client2_guard = client2.lock().await;
+            client2_guard.subscribe_and_receive_messages(node_addr).await;
+            info!("Subscription initiated for client 2");
         }
-        client1.send_message(recipient_public_address, &test_message).await;
 
-        // --- Verify Receipt with Timeout (Client 2) ---
-        let message_received = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let client2_guard = client2_clone.lock().await;
-                if let Some(packets) = client2_guard.messages_received.lock().await.values().next() {
-                    for packet in packets {
-                        if let Some((plaintext, _)) = packet.verify_and_decrypt(&client2_guard.private_address, 1) {
-                            if plaintext == test_message {
-                                return true; // Message found
+        // Give subscription time to fully establish
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // --- Send Message ---
+        info!("Sending test message...");
+        let test_message = b"Hello from Client 1!".to_vec();
+        
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client1.send_message(recipient_public_address.clone(), &test_message)
+        ).await.expect("Send message timeout");
+        info!("Test message sent");
+
+        // --- Wait for Message Receipt ---
+        info!("Waiting for message receipt...");
+        let message_received = tokio::time::timeout(
+            Duration::from_secs(10),
+            async {
+                let start = tokio::time::Instant::now();
+                while start.elapsed() < Duration::from_secs(8) {
+                    let found = {
+                        let client2_guard = client2.lock().await;
+                        let messages = client2_guard.messages_received.lock().await;
+                        
+                        let mut message_found = false;
+                        for packets in messages.values() {
+                            for packet in packets {
+                                if let Some((plaintext, _)) = packet.verify_and_decrypt(
+                                    &client2_private_address, 
+                                    1
+                                ) {
+                                    info!("Received message: {:?}", String::from_utf8_lossy(&plaintext));
+                                    if plaintext == test_message {
+                                        message_found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if message_found {
+                                break;
                             }
                         }
+                        message_found
+                    };
+
+                    if found {
+                        return true;
                     }
+
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                drop(client2_guard); // Release the lock
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                warn!("Message not found after timeout");
+                false
             }
-        }).await;
+        ).await.expect("Message receipt timeout");
 
-        assert!(message_received.unwrap_or(false), "Client 2 did not receive the message within the timeout");
-
-        receive_task.abort();
+        assert!(message_received, "Message was not received within timeout period");
+        info!("Test completed successfully");
     }
 }
