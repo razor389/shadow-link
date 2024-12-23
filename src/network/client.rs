@@ -20,7 +20,7 @@ pub type VerificationKeyBytes = [u8;32];
 
 pub struct Client {
     private_address: PrivateAddress,
-    pub max_prefix_length: usize,
+    pub max_prefix_length: u8,
     pub min_argon2_params: SerializableArgon2Params,
     pub require_exact_argon2: bool,
     pub connected_node: Option<NodeInfoExtended>,
@@ -34,7 +34,7 @@ impl Client {
     pub fn new(
         prefix: Option<RoutingPrefix>, 
         length: Option<u8>,
-        max_prefix_length: usize,
+        max_prefix_length: u8,
         min_argon2_params: SerializableArgon2Params,
         require_exact_argon2: bool,
         bootstrap_node_address: SocketAddr,
@@ -399,13 +399,25 @@ impl Client {
         &self,
         nodes: Vec<NodeInfoExtended>,
     ) -> Option<NodeInfoExtended> {
-        // Filter nodes based on Argon2 parameters and other preferences
+        // Filter nodes based on:
+        // 1. Argon2 parameters
+        // 2. Prefix length <= max_prefix_length
+        // 3. Node serves client prefix (should already be the case, but we double check)
         let mut matching_nodes: Vec<_> = nodes.into_iter().filter(|node| {
-            if self.require_exact_argon2 {
+            // Check Argon2 parameter requirements
+            let argon2_match = if self.require_exact_argon2 {
                 node.min_argon2_params == self.min_argon2_params
             } else {
                 node.min_argon2_params.meets_min(&self.min_argon2_params)
-            }
+            };
+
+            // Check prefix length constraint
+            let prefix_length_ok = node.routing_prefix.bit_length <= self.max_prefix_length;
+
+            // Check prefix bits alignment
+            let serves_prefix = node.routing_prefix.serves(&self.private_address.public_address.prefix);
+
+            argon2_match && prefix_length_ok && serves_prefix
         }).collect();
 
         if matching_nodes.is_empty() {
