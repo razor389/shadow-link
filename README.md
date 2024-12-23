@@ -1,15 +1,14 @@
 # ShadowLink
 
-ShadowLink is a decentralized, encrypted messaging network inspired by Bitmessage, but redesigned for scalability, security, and efficiency using modern cryptographic techniques and blockchain-based incentives. This project is implemented in Rust, leveraging its safety guarantees and performance.
+ShadowLink is a decentralized, encrypted messaging network inspired by Bitmessage, but redesigned for scalability, security, and efficiency using modern cryptographic techniques. This project is implemented in Rust, leveraging its safety guarantees and performance.
 
 ## Overview
 
-ShadowLink builds on the core ideas of Bitmessage but introduces key improvements for scalability and robustness, incorporating a blockchain to incentivize honest node behavior and ensure reliable message propagation. Nodes and clients form the backbone of the network, providing both storage and communication capabilities.
+ShadowLink builds on the core ideas of Bitmessage but introduces key improvements for scalability, robustness, and improved anonymity. Nodes and clients form the backbone of the network, providing both storage and communication capabilities.
 
 ### Key Features
 
-- **Encrypted Messaging**: End-to-end encryption using X25519 for key exchange and Ed25519 for authentication.
-- **Blockchain for Incentives**: Proof of Stake and Proof of Retrievability mechanisms ensure fair payment for nodes hosting and forwarding messages.
+- **Encrypted Messaging**: End-to-end encryption using Curve25519 for key exchange and Ed25519 for authentication.
 - **Scalable Architecture**: Address-prefix-based routing using a Distributed Hash Table (DHT) ensures efficient message handling while preserving anonymity.
 - **Spam Prevention**: Proof of Memory (PoM) using Argon2id to prevent network abuse.
 - **Flexible Operation Modes**: Operates in either client or node mode.
@@ -27,18 +26,6 @@ The project is organized to separate concerns, providing a modular and maintaina
 - **`/src/storage`**: Message storage, proof verification, and message relay handling.
 - **`/src/crypto`**: Encryption and authentication functionality.
 - **`/src/utils`**: Helper functions and utilities shared across modules.
-
----
-
-## Blockchain-Based Incentives
-
-ShadowLink uses a blockchain to maintain a fair and robust incentive structure:
-
-- **Proof of Stake (PoS)**: Nodes stake tokens to participate in the network and earn hosting and relay rewards proportional to their stake and uptime. Slashing penalties discourage dishonest behavior.
-- **Proof of Retrievability (PoR)**: Nodes must submit cryptographic proofs showing they are hosting messages to receive incremental payments.
-- **Proof of Relay (PoRelay)**: Nodes must provide acknowledgments from subscribers to confirm message forwarding and claim subscription fees.
-
----
 
 ## Getting Started
 
