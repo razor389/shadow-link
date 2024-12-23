@@ -408,7 +408,6 @@ mod tests {
     use crate::types::routing_prefix::RoutingPrefix;
     use std::net::SocketAddr;
     use std::str::FromStr;
-    use std::sync::Arc;
     use crate::network::node::Node;
     use tokio::sync::oneshot;
     use tokio::time::Duration;
@@ -524,8 +523,14 @@ mod tests {
             let _ = tx.send(()); // Signal that subscription has started
 
             // Continuously receive packets
-            while let Some(packet) = client2_guard.receive_packet().await {
-                client2_guard.handle_incoming_packet(packet).await;
+            loop {
+                // Use timeout for receiving each packet
+                if let Ok(Some(packet)) = tokio::time::timeout(Duration::from_millis(100), client2_guard.receive_packet()).await {
+                    client2_guard.handle_incoming_packet(packet).await;
+                } else {
+                    // Handle timeout - possibly log or check for other conditions
+                    continue; // Continue the loop after a timeout
+                }
             }
         });
 
@@ -547,28 +552,23 @@ mod tests {
         // --- Verify Receipt with Timeout (Client 2) ---
         let message_received = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
                 let client2_guard = client2_clone.lock().await;
-                let received_packets_map = client2_guard.messages_received.lock().await;
-                for packets in received_packets_map.values() {
+                if let Some(packets) = client2_guard.messages_received.lock().await.values().next() {
                     for packet in packets {
                         if let Some((plaintext, _)) = packet.verify_and_decrypt(&client2_guard.private_address, 1) {
                             if plaintext == test_message {
-                                return true;
+                                return true; // Message found
                             }
                         }
                     }
                 }
-                if Arc::strong_count(&client2_clone) == 1 {
-                    break;
-                }
+                drop(client2_guard); // Release the lock
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            false
         }).await;
 
         assert!(message_received.unwrap_or(false), "Client 2 did not receive the message within the timeout");
 
-        // Abort the receive_task to clean up
         receive_task.abort();
     }
 }
