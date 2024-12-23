@@ -27,27 +27,42 @@ The project is organized to separate concerns, providing a modular and maintaina
 - **`/src/crypto`**: Encryption and authentication functionality.
 - **`/src/utils`**: Helper functions and utilities shared across modules.
 
+---
+
 ## Getting Started
 
 ### Prerequisites
 
-- Install [Rust](https://www.rust-lang.org/) and its toolchain.
-- Clone the repository:
+1. **Install Rust and Cargo**
 
-  ```bash
-  git clone https://github.com/razor389/shadow-link.git
-  cd shadow-link
-  ```
+   ShadowLink is implemented in Rust. Ensure you have Rust and Cargo installed. You can install them using the following command:
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+   For more details, visit the [official Rust website](https://www.rust-lang.org/).
+
+2. **Clone the Repository**
+
+   ```bash
+   git clone https://github.com/razor389/shadow-link.git
+   cd shadow-link
+   ```
 
 ### Building the Project
 
-1. Compile the project:
+1. **Compile the Project**
+
+   Build the project in release mode for optimal performance:
 
    ```bash
    cargo build --release
    ```
 
-2. Run tests to verify functionality:
+2. **Run Tests**
+
+   Verify the functionality by running the test suite:
 
    ```bash
    cargo test
@@ -59,54 +74,109 @@ The project is organized to separate concerns, providing a modular and maintaina
 
 ShadowLink can operate in either **node mode** or **client mode**, depending on your use case.
 
-### Running as a Node
+### Running a Node
 
 Nodes form the backbone of the network, handling message storage, routing, and distribution.
 
-1. Start a node:
+1. **Basic Node Startup**
 
    ```bash
-   cargo run --release --bin node -- --address "127.0.0.1:12345" --connect "127.0.0.1:12346"
+   cargo run --release --bin node -- \
+       --address 127.0.0.1:8000 \
+       --prefix FF \
+       --bootstrap 127.0.0.1:8001,127.0.0.1:8002
    ```
 
-   - `--address`: The node’s IP and port.
-   - `--connect`: (Optional) Connect to other nodes by providing their addresses.
+2. **Full Options Example**
 
-2. Nodes automatically begin gossiping with peers and handling messages for assigned prefixes.
+   ```bash
+   cargo run --release --bin node -- \
+       --address 127.0.0.1:8000 \
+       --prefix FF \
+       --bootstrap 127.0.0.1:8001 \
+       --pow-difficulty 10 \
+       --max-ttl 86400 \
+       --min-m-cost 8 \
+       --min-t-cost 1 \
+       --min-p-cost 1 \
+       --cleanup-interval 300 \
+       --blacklist-duration 600 \
+       --discovery-interval 3600
+   ```
 
-### Running as a Client
+#### Node Command-Line Arguments
+
+- `--address`: **(Required)** Socket address for the node (e.g., `127.0.0.1:8000`).
+- `--prefix`: **(Required)** Routing prefix in hexadecimal.
+- `--bootstrap`: Comma-separated list of bootstrap node addresses to connect with.
+- `--pow-difficulty`: Proof of Work difficulty level (default: `10`).
+- `--max-ttl`: Maximum Time-To-Live for messages in seconds (default: `86400`).
+- `--min-m-cost`: Minimum Argon2 memory cost (default: `8`).
+- `--min-t-cost`: Minimum Argon2 time cost (default: `1`).
+- `--min-p-cost`: Minimum Argon2 parallelism cost (default: `1`).
+- `--cleanup-interval`: Interval in seconds for cleaning expired packets (default: `300`).
+- `--blacklist-duration`: Duration in seconds for IP blacklisting (default: `600`).
+- `--discovery-interval`: Node discovery interval in seconds (default: `3600`).
+
+### Running a Client
 
 Clients interact with the network by sending and receiving encrypted messages.
 
-1. Start a client:
+1. **Basic Client Usage**
 
    ```bash
-   cargo run --release --bin client -- --address "127.0.0.1:12345"
+   cargo run --release --bin client -- \
+       --bootstrap 127.0.0.1:8000 \
+       --prefix FF \
+       --length 8
    ```
 
-   - `--address`: The IP and port of the node to connect to.
+2. **Full Options Example**
 
-2. The client can send and receive encrypted messages.
+   ```bash
+   cargo run --release --bin client -- \
+       --bootstrap 127.0.0.1:8000 \
+       --prefix FF \
+       --length 8 \
+       --max-prefix 64 \
+       --min-m-cost 8 \
+       --min-t-cost 1 \
+       --min-p-cost 1 \
+       --exact-argon2
+   ```
+
+#### Client Command-Line Arguments
+
+- `--bootstrap`: **(Required)** Bootstrap node address to connect to (e.g., `127.0.0.1:8000`).
+- `--prefix`: Desired routing prefix in hexadecimal (optional).
+- `--length`: Bit length for generated prefix (optional).
+- `--max-prefix`: Maximum prefix length to search for (default: `64`).
+- `--min-m-cost`: Minimum Argon2 memory cost.
+- `--min-t-cost`: Minimum Argon2 time cost.
+- `--min-p-cost`: Minimum Argon2 parallelism cost.
+- `--exact-argon2`: Use exact Argon2 parameters for PoM.
 
 ---
 
 ## Logging
 
-Configure logging levels using the `RUST_LOG` environment variable:
+Configure logging levels using the `RUST_LOG` environment variable to control the verbosity of logs.
 
-- **Bash**:
+- **Bash**
 
   ```bash
   export RUST_LOG=info
   ```
 
-- **PowerShell**:
+- **PowerShell**
 
   ```powershell
   $env:RUST_LOG="info"
   ```
 
-Use `--nocapture` to view logs during test runs:
+- **Viewing Logs During Test Runs**
+
+Use the `--nocapture` flag to view logs while running tests:
 
 ```bash
 cargo test -- --nocapture
@@ -139,5 +209,3 @@ cargo test -- --nocapture
 ## License
 
 ShadowLink is licensed under the MIT License. See the [`LICENSE`](./LICENSE) file for details.
-
----
