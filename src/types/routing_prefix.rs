@@ -113,10 +113,10 @@ impl RoutingPrefix {
     }
 
     /// Calculate the XOR distance between two RoutingPrefixes
-    pub fn xor_distance(&self, other: &Self) -> Option<u64> {
+    pub fn xor_distance(&self, other: &Self) -> (Option<u64>, u8) {
         // If either of the prefixes has no bits, return None
         if self.bits.is_none() || other.bits.is_none() {
-            return None;
+            return (None, 0);
         }
 
         // Determine the effective bit length to use (minimum of the two bit lengths)
@@ -127,8 +127,13 @@ impl RoutingPrefix {
         let self_bits = self.bits.unwrap() & mask;
         let other_bits = other.bits.unwrap() & mask;
 
+        // If bits are identical after masking, return None
+        if self_bits == other_bits {
+            return (None, effective_bit_length);
+        }
+
         // Compute the XOR distance
-        Some(self_bits ^ other_bits)
+        (Some(self_bits ^ other_bits), effective_bit_length)
     }
 }
 
@@ -263,32 +268,32 @@ mod tests {
 
     #[test]
     fn test_xor_distance() {
-        // Test XOR distance calculation
-        let prefix1 = create_prefix(8, 0b10101010); // 10101010 shifted
-        let prefix2 = create_prefix(8, 0b11001100); // 11001100 shifted
-        let prefix3 = create_prefix(4, 0b1100);     // 1100 shifted
+        // Test with different prefixes
+        let prefix1 = create_prefix(3, 0b101); // 101 aligned to high bits
+        let prefix2 = create_prefix(3, 0b100); // 100 aligned to high bits
 
-        // Same bit length
-        assert_eq!(
-            prefix1.xor_distance(&prefix2),
-            Some((0b10101010 ^ 0b11001100) << (64 - 8)),
-            "XOR distance between prefix1 and prefix2"
-        );
+        let (distance_opt, effective_length) = prefix1.xor_distance(&prefix2);
+        assert_eq!(effective_length, 3);
+        assert!(distance_opt.is_some());
+        assert_eq!(distance_opt.unwrap(), 0b001 << (64 - 3)); // Distance should be 001 aligned to high bits
 
-        // Different bit lengths
-        assert_eq!(
-            prefix1.xor_distance(&prefix3),
-            Some((0b1010 ^ 0b1100) << (64 - 4)),
-            "XOR distance between prefix1 and prefix3 with effective bit length 4"
-        );
+        // Test with identical prefixes
+        let (distance_opt, effective_length) = prefix1.xor_distance(&prefix1);
+        assert_eq!(distance_opt, None);
+        assert_eq!(effective_length, 3);
 
-        // One prefix has no bits
+        // Test with prefix matching up to effective_bit_length
+        let prefix3 = create_prefix(4, 0b1010); // 1010 aligned
+        let prefix4 = create_prefix(3, 0b101);  // 101 aligned
+        let (distance_opt, effective_length) = prefix3.xor_distance(&prefix4);
+        assert_eq!(distance_opt, None);
+        assert_eq!(effective_length, 3);
+
+        // Test with no bits
         let prefix_none = create_prefix(0, 0);
-        assert_eq!(
-            prefix1.xor_distance(&prefix_none),
-            None,
-            "XOR distance when one prefix has no bits"
-        );
+        let (distance_opt, effective_length) = prefix1.xor_distance(&prefix_none);
+        assert_eq!(distance_opt, None);
+        assert_eq!(effective_length, 0);
     }
 
     #[test]

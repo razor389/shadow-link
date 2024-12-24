@@ -5,8 +5,8 @@ use crate::types::{node_info::{NodeId, NodeInfo}, routing_prefix::RoutingPrefix}
 
 /// The maximum number of nodes per k-bucket (k)
 const K: usize = 20;
-/// The minimum acceptable bucket index (nodes with a lower index are considered too far)
-const MIN_ACCEPTABLE_BUCKET_INDEX: usize = 5;
+/// The maximum acceptable bucket index (nodes with a higher index are considered too far)
+const MAX_ACCEPTABLE_BUCKET_INDEX: usize = 58; // 64 - MIN_ACCEPTABLE_BUCKET_INDEX from original
 
 /// Kademlia Routing Table
 pub struct RoutingTable {
@@ -22,7 +22,7 @@ pub struct KBucket {
 impl RoutingTable {
     pub fn new(id: NodeId, prefix: RoutingPrefix) -> Self {
         let mut k_buckets = Vec::new();
-        for _ in 0..64 { // Adjusted to 64 buckets
+        for _ in 0..64 { // Still using 64 buckets
             k_buckets.push(KBucket::new());
         }
         RoutingTable { id, prefix, k_buckets }
@@ -48,9 +48,15 @@ impl RoutingTable {
 
         // Sort nodes by XOR distance to the target prefix
         all_nodes.sort_by(|a, b| {
-            a.routing_prefix.xor_distance(target_prefix)
-                .unwrap_or(u64::MAX)
-                .cmp(&b.routing_prefix.xor_distance(target_prefix).unwrap_or(u64::MAX))
+            let (dist_a, len_a) = a.routing_prefix.xor_distance(target_prefix);
+            let (dist_b, len_b) = b.routing_prefix.xor_distance(target_prefix);
+
+            match (dist_a, dist_b) {
+                (None, None) => len_b.cmp(&len_a), // Both match, prefer longer matching prefix
+                (None, Some(_)) => std::cmp::Ordering::Less, // None (matching) comes first
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(dist_a), Some(dist_b)) => dist_a.cmp(&dist_b) // Normal distance comparison
+            }
         });
 
         // Truncate the result to return up to K nodes
@@ -60,44 +66,50 @@ impl RoutingTable {
 
     /// Update the routing table with a new node
     pub fn update(&mut self, node_info: NodeInfo) {
-        if let Some(distance) = self.prefix.xor_distance(&node_info.routing_prefix) {
-            if distance == 0 {
-                // Do not add own node or identical nodes
-                return;
-            }
+        // Don't add our own node
+        if node_info.id == self.id {
+            return;
+        }
 
-            let leading_zeros = distance.leading_zeros();
+        let (distance_opt, effective_bit_length) = self.prefix.xor_distance(&node_info.routing_prefix);
 
-            if leading_zeros >= 64 {
-                // Invalid distance (only possible if distance == 0, already handled)
-                return;
-            }
-
-            // Calculate the bucket index based on Kademlia's convention
-            // Bucket 0: [2^63, 2^64), Bucket 1: [2^62, 2^63), ..., Bucket 63: [2^0, 2^1)
-            let bucket_index = (63 - leading_zeros) as usize;
-
-            if bucket_index >= self.k_buckets.len() {
-                return; // Ignore nodes that are out of bounds (shouldn't happen)
-            }
-
-            // **Add this check for MIN_ACCEPTABLE_BUCKET_INDEX**
-            if bucket_index < MIN_ACCEPTABLE_BUCKET_INDEX {
-                return; // Ignore nodes that are too far
-            }
-
-            let bucket = &mut self.k_buckets[bucket_index];
-
-            // Check if the node is already in the bucket
-            if let Some(pos) = bucket.nodes.iter().position(|n| n.id == node_info.id) {
-                // Move the node to the end to mark it as recently seen
-                let node = bucket.nodes.remove(pos);
-                bucket.nodes.push(node);
-            } else {
-                if bucket.nodes.len() < K {
+        match distance_opt {
+            None => {
+                // Handle nodes with matching prefixes (up to effective_bit_length)
+                let bucket = &mut self.k_buckets[0];
+                if let Some(pos) = bucket.nodes.iter().position(|n| n.id == node_info.id) {
+                    let node = bucket.nodes.remove(pos);
+                    bucket.nodes.push(node);
+                } else if bucket.nodes.len() < K {
                     bucket.nodes.push(node_info);
                 } else {
-                    // Bucket is full; replace the least recently seen node
+                    bucket.nodes.remove(0);
+                    bucket.nodes.push(node_info);
+                }
+            }
+            Some(distance) => {
+                // Find the position of the first 1 in the distance (first differing bit)
+                let first_diff_pos = effective_bit_length as u32 - distance.leading_zeros();
+                let bucket_index = first_diff_pos as usize;
+
+                if bucket_index >= self.k_buckets.len() {
+                    return; // Ignore nodes that are out of bounds
+                }
+
+                // Don't store nodes that are too far away
+                if bucket_index > MAX_ACCEPTABLE_BUCKET_INDEX {
+                    return;
+                }
+
+                let bucket = &mut self.k_buckets[bucket_index];
+
+                // Check if the node is already in the bucket
+                if let Some(pos) = bucket.nodes.iter().position(|n| n.id == node_info.id) {
+                    let node = bucket.nodes.remove(pos);
+                    bucket.nodes.push(node);
+                } else if bucket.nodes.len() < K {
+                    bucket.nodes.push(node_info);
+                } else {
                     bucket.nodes.remove(0);
                     bucket.nodes.push(node_info);
                 }
@@ -175,185 +187,241 @@ mod tests {
 
     #[test]
     fn test_routing_table_new() {
-        // Create a new routing table
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0b10101011u64; // Controlled prefix
+        let routing_table_prefix_bits = 0b10101011u64;
         let prefix = create_prefix(8, routing_table_prefix_bits);
         let routing_table = RoutingTable::new(id, prefix.clone());
 
-        // Check that the routing table is initialized correctly
-        assert_eq!(routing_table.id, id, "Routing table ID mismatch");
-        assert_eq!(routing_table.prefix, prefix, "Routing table prefix mismatch");
-        assert_eq!(routing_table.k_buckets.len(), 64, "Incorrect number of k_buckets");
-        // Check that all buckets are empty
+        assert_eq!(routing_table.id, id);
+        assert_eq!(routing_table.prefix, prefix);
+        assert_eq!(routing_table.k_buckets.len(), 64);
         for bucket in &routing_table.k_buckets {
-            assert!(bucket.nodes.is_empty(), "Bucket should be empty");
+            assert!(bucket.nodes.is_empty());
         }
     }
 
     #[test]
     fn test_routing_table_update_and_get_all_nodes() {
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0b10101011u64; // Controlled prefix
+        let routing_table_prefix_bits = 0b10101011u64;
         let prefix = create_prefix(8, routing_table_prefix_bits);
         let mut routing_table = RoutingTable::new(id, prefix);
 
-        // Create some NodeInfo instances
-        let node1 = generate_node_info(1, 0b10101010, "127.0.0.1:8080"); // Same bucket
-        let node2 = generate_node_info(2, 0b10101010, "127.0.0.2:8080"); // Same bucket
+        let node1 = generate_node_info(1, 0b10101010, "127.0.0.1:8080");
+        let node2 = generate_node_info(2, 0b10101010, "127.0.0.2:8080");
 
-        // Update the routing table with the nodes
         routing_table.update(node1.clone());
         routing_table.update(node2.clone());
 
-        // Get all nodes and check
         let nodes = routing_table.get_all_nodes();
-        assert_eq!(nodes.len(), 2, "Routing table should have 2 nodes");
-        assert!(nodes.contains(&node1), "Routing table should contain node1");
-        assert!(nodes.contains(&node2), "Routing table should contain node2");
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.contains(&node1));
+        assert!(nodes.contains(&node2));
     }
 
     #[test]
     fn test_routing_table_find_closest_nodes() {
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0b00001111u64; // Controlled prefix
+        let routing_table_prefix_bits = 0b00001111u64;
         let prefix = create_prefix(8, routing_table_prefix_bits);
         let mut routing_table = RoutingTable::new(id, prefix.clone());
 
-        // Create some NodeInfo instances with different prefixes
-        let target_prefix = create_prefix(8, 0b00001111u64); // Target prefix same as routing table
+        let target_prefix = create_prefix(8, 0b00001111u64);
 
-        let node1 = generate_node_info(1, 0b00001110, "127.0.0.1:8080"); // Distance=0b00000001
-        let node2 = generate_node_info(2, 0b00001100, "127.0.0.2:8080"); // Distance=0b00000011
-        let node3 = generate_node_info(3, 0b11110000, "127.0.0.3:8080"); // Distance=0b11111111
+        let node1 = generate_node_info(1, 0b00001110, "127.0.0.1:8080");
+        let node2 = generate_node_info(2, 0b00001100, "127.0.0.2:8080");
+        let node3 = generate_node_info(3, 0b11110000, "127.0.0.3:8080");
 
-        // Update the routing table with the nodes
         routing_table.update(node1.clone());
         routing_table.update(node2.clone());
         routing_table.update(node3.clone());
 
-        // Find closest nodes to target_prefix
         let closest_nodes = routing_table.find_closest_nodes(&target_prefix);
 
-        // Should return node1, node2, node3 in order of closeness
-        assert_eq!(closest_nodes.len(), 3, "Should return all 3 nodes");
-
-        // Check the order based on distance
-        assert_eq!(closest_nodes[0], node1, "node1 should be the closest");
-        assert_eq!(closest_nodes[1], node2, "node2 should be the second closest");
-        assert_eq!(closest_nodes[2], node3, "node3 should be the farthest");
+        assert_eq!(closest_nodes.len(), 3);
+        assert_eq!(closest_nodes[0], node1);
+        assert_eq!(closest_nodes[1], node2);
+        assert_eq!(closest_nodes[2], node3);
     }
 
     #[test]
     fn test_routing_table_remove_node_by_ip() {
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0b10101011u64; // Controlled prefix
+        let routing_table_prefix_bits = 0b10101011u64;
         let prefix = create_prefix(8, routing_table_prefix_bits);
         let mut routing_table = RoutingTable::new(id, prefix);
 
-        let node = generate_node_info(1, 0b10101010, "127.0.0.1:8080"); // Same bucket
+        let node = generate_node_info(1, 0b10101010, "127.0.0.1:8080");
 
         routing_table.update(node.clone());
-        assert_eq!(routing_table.get_all_nodes().len(), 1, "Routing table should have 1 node");
+        assert_eq!(routing_table.get_all_nodes().len(), 1);
 
         routing_table.remove_node_by_ip(&node.address.ip());
-        assert_eq!(routing_table.get_all_nodes().len(), 0, "Routing table should be empty after removal");
+        assert_eq!(routing_table.get_all_nodes().len(), 0);
     }
 
     #[test]
     fn test_routing_table_mark_node_alive() {
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0b10101011u64; // Controlled prefix
+        let routing_table_prefix_bits = 0b10101011u64;
         let prefix = create_prefix(8, routing_table_prefix_bits);
         let mut routing_table = RoutingTable::new(id, prefix);
 
-        let node1 = generate_node_info(1, 0b10101010, "127.0.0.1:8080"); // Same bucket
-        let node2 = generate_node_info(2, 0b10101010, "127.0.0.2:8080"); // Same bucket
+        let node1 = generate_node_info(1, 0b10101010, "127.0.0.1:8080");
+        let node2 = generate_node_info(2, 0b10101010, "127.0.0.2:8080");
 
-        // Update routing table with nodes
         routing_table.update(node1.clone());
         routing_table.update(node2.clone());
 
-        // Initially, node2 is the most recently seen node in its bucket
-        // Mark node1 as alive, it should become the most recently seen node
-
         routing_table.mark_node_alive(node1.address);
 
-        // Verify that node1 is now the most recently seen node in its bucket
-        if let Some(distance) = routing_table.prefix.xor_distance(&node1.routing_prefix) {
-            let bucket_index = (63 - distance.leading_zeros()) as usize; // Corrected calculation
-            let bucket = &routing_table.k_buckets[bucket_index];
-            let last_node = bucket.nodes.last().unwrap();
-            assert_eq!(last_node.id, node1.id, "node1 should be the most recently seen node");
-        } else {
-            panic!("Failed to compute distance");
+        // Get the bucket index from XOR distance
+        let (distance_opt, effective_bit_length) = routing_table.prefix.xor_distance(&node1.routing_prefix);
+        match distance_opt {
+            Some(distance) => {
+                let first_diff_pos = effective_bit_length as u32 - distance.leading_zeros();
+                let bucket_index = first_diff_pos as usize;
+                let bucket = &routing_table.k_buckets[bucket_index];
+                let last_node = bucket.nodes.last().unwrap();
+                assert_eq!(last_node.id, node1.id, "Node1 should be the most recently seen node");
+            }
+            None => {
+                // If distance is None, check bucket 0
+                let bucket = &routing_table.k_buckets[0];
+                let last_node = bucket.nodes.last().unwrap();
+                assert_eq!(last_node.id, node1.id, "Node1 should be the most recently seen node in bucket 0");
+            }
         }
     }
 
     #[test]
     fn test_routing_table_bucket_overflow() {
-        // Test that the routing table handles bucket overflow correctly
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0b10101011u64; // Controlled prefix
+        let routing_table_prefix_bits = 0b10101011u64;
         let prefix = create_prefix(8, routing_table_prefix_bits);
         let mut routing_table = RoutingTable::new(id, prefix);
 
-        // Generate K + 1 nodes that should all go into the same bucket
         let mut nodes = Vec::new();
         for i in 0..(K as u8 + 1) {
             let node = generate_node_info(
                 i,
-                0b10101010, // Node prefix bits
+                0b10101010,
                 &format!("127.0.0.{}:8080", i),
             );
             nodes.push(node);
         }
 
-        // Update the routing table with all nodes
         for node in &nodes {
             routing_table.update(node.clone());
         }
 
-        // The bucket should contain only K nodes
-        if let Some(distance) = routing_table.prefix.xor_distance(&nodes[0].routing_prefix) {
-            let bucket_index = (63 - distance.leading_zeros()) as usize; // Corrected calculation
-            let bucket = &routing_table.k_buckets[bucket_index];
-            assert_eq!(bucket.nodes.len(), K, "Bucket should contain K nodes");
-        } else {
-            panic!("Failed to compute distance");
-        }
+        let (distance_opt, effective_bit_length) = routing_table.prefix.xor_distance(&nodes[0].routing_prefix);
+        match distance_opt {
+            Some(distance) => {
+                let first_diff_pos = effective_bit_length as u32 - distance.leading_zeros();
+                let bucket_index = first_diff_pos as usize;
+                let bucket = &routing_table.k_buckets[bucket_index];
+                assert_eq!(bucket.nodes.len(), K, "Bucket should contain K nodes");
 
-        // The least recently seen node (first inserted) should have been replaced
-        let all_nodes = routing_table.get_all_nodes();
-        assert!(!all_nodes.contains(&nodes[0]), "The first node should have been removed");
-        for node in &nodes[1..] {
-            assert!(all_nodes.contains(node), "Node {:?} should be present", node);
+                let all_nodes = routing_table.get_all_nodes();
+                assert!(!all_nodes.contains(&nodes[0]), "First node should have been removed");
+                for node in &nodes[1..] {
+                    assert!(all_nodes.contains(node), "Later nodes should be present");
+                }
+            }
+            None => {
+                // If distance is None, check bucket 0
+                let bucket = &routing_table.k_buckets[0];
+                assert_eq!(bucket.nodes.len(), K, "Bucket 0 should contain K nodes");
+                
+                let all_nodes = routing_table.get_all_nodes();
+                assert!(!all_nodes.contains(&nodes[0]), "First node should have been removed");
+                for node in &nodes[1..K+1] {
+                    assert!(all_nodes.contains(node), "Later nodes should be present");
+                }
+            }
         }
     }
 
     #[test]
     fn test_routing_table_ignore_far_nodes() {
-        // Nodes that are too far (bucket index < MIN_ACCEPTABLE_BUCKET_INDEX) should be ignored
         let id = [0u8; 20];
-        let routing_table_prefix_bits = 0xFF00000000000000u64; // Controlled prefix
-        let prefix = create_prefix(64, routing_table_prefix_bits);
-        let mut routing_table = RoutingTable::new(id.clone(), prefix.clone());
+        // Create routing table with prefix 0
+        let routing_table_prefix = create_prefix(64, 0);
+        let mut routing_table = RoutingTable::new(id, routing_table_prefix);
 
-        // Create a distant node with distance=1<<4=16, which results in bucket_index=4
-        let distance_bits = 1u64 << 4; // 0x0000000000000010
-        let node_prefix_bits = routing_table_prefix_bits ^ distance_bits; // 0xFF00000000000000 ^ 0x10 = 0xFF00000000000010
-        let distant_prefix = create_prefix(64, node_prefix_bits);
-        let distant_node = NodeInfo {
+        // Create node with bit set in position 61 counting from right
+        let far_node_bits = 1u64 << 60;  // Will create distance in position 61
+        let far_node = NodeInfo {
             id: [1u8; 20],
-            routing_prefix: distant_prefix,
+            routing_prefix: create_prefix(64, far_node_bits),
             address: "127.0.0.1:8080".parse().unwrap(),
         };
 
-        routing_table.update(distant_node);
+        // Debug print the nodes' prefixes and distance
+        println!("Routing table prefix bits: {:064b}", routing_table_prefix.bits.unwrap_or(0));
+        println!("Far node prefix bits:      {:064b}", far_node.routing_prefix.bits.unwrap_or(0));
 
-        // The node should not be added to the routing table because it's too far
+        let (distance_opt, effective_bit_length) = routing_table.prefix.xor_distance(&far_node.routing_prefix);
+        match distance_opt {
+            Some(distance) => {
+                println!("XOR distance bits:         {:064b}", distance);
+                println!("Effective bit length:      {}", effective_bit_length);
+                println!("Leading zeros:             {}", distance.leading_zeros());
+                let first_diff_pos = effective_bit_length as u32 - distance.leading_zeros();
+                println!("First differing position:  {}", first_diff_pos);
+                println!("MAX_ACCEPTABLE_BUCKET_INDEX: {}", MAX_ACCEPTABLE_BUCKET_INDEX);
+            }
+            None => println!("Got None distance"),
+        }
+
+        routing_table.update(far_node.clone());
+
+        // Verify no nodes were added
         let nodes = routing_table.get_all_nodes();
-        assert!(nodes.is_empty(), "Distant node should be ignored");
+        assert!(nodes.is_empty(), "Node should be rejected as too far");
+
+        // Verify the bucket index calculation
+        if let Some(distance) = distance_opt {
+            let first_diff_pos = effective_bit_length as u32 - distance.leading_zeros();
+            assert!(first_diff_pos as usize > MAX_ACCEPTABLE_BUCKET_INDEX,
+                "Bucket index {} should be greater than MAX_ACCEPTABLE_BUCKET_INDEX {}",
+                first_diff_pos,
+                MAX_ACCEPTABLE_BUCKET_INDEX);
+        }
     }
 
+    #[test]
+    fn test_bucket_index_ordering() {
+        let id = [0u8; 20];
+        let prefix = create_prefix(5, 0b10110);
+        let mut routing_table = RoutingTable::new(id, prefix.clone());
+
+        let node1 = NodeInfo {
+            id: [1u8; 20],
+            routing_prefix: create_prefix(5, 0b10111),
+            address: "127.0.0.1:8080".parse().unwrap(),
+        };
+
+        let node2 = NodeInfo {
+            id: [2u8; 20],
+            routing_prefix: create_prefix(5, 0b10100),
+            address: "127.0.0.2:8080".parse().unwrap(),
+        };
+
+        routing_table.update(node1.clone());
+        routing_table.update(node2.clone());
+
+        let find_bucket_index = |node: &NodeInfo| -> Option<usize> {
+            routing_table.k_buckets.iter().position(|bucket| {
+                bucket.nodes.iter().any(|n| n.id == node.id)
+            })
+        };
+
+        let node1_index = find_bucket_index(&node1).unwrap();
+        let node2_index = find_bucket_index(&node2).unwrap();
+
+        assert!(node1_index < node2_index, 
+            "Node with prefix 10111 should be in a lower bucket than node with prefix 10100");
+    }
 }
