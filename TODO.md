@@ -3,7 +3,7 @@
 - Add `address_book.rs` (not yet created) for the client to maintain contact details.
 - Implement periodic node honesty testing by both clients and nodes.
 - Consider adding support for group messages.
-- Can we improve routing prefix and dht structure? we'd like routing prefix 101 to represent 101...0 (with 61 trailing zeros) without having to take up 64 bits
+- Can we improve routing prefix and dht structure? we'd like routing prefix 101 to represent 101...0 (with 61 trailing zeros) without having to take up 64 bits. can we improve routing / graph structure as well?
 
 ---
 
