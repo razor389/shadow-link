@@ -71,9 +71,9 @@ impl RoutingTable {
             return;
         }
 
-        let (distance_opt, effective_bit_length) = self.prefix.xor_distance(&node_info.routing_prefix);
+        let (first_diff_bit, _effective_bit_length) = self.prefix.xor_distance(&node_info.routing_prefix);
 
-        match distance_opt {
+        match first_diff_bit {
             None => {
                 // Handle nodes with matching prefixes (up to effective_bit_length)
                 let bucket = &mut self.k_buckets[0];
@@ -89,8 +89,7 @@ impl RoutingTable {
             }
             Some(distance) => {
                 // Find the position of the first 1 in the distance (first differing bit)
-                let first_diff_pos = effective_bit_length as u32 - distance.leading_zeros();
-                let bucket_index = first_diff_pos as usize;
+                let bucket_index = (distance + 1) as usize;
 
                 if bucket_index >= self.k_buckets.len() {
                     return; // Ignore nodes that are out of bounds
@@ -159,13 +158,8 @@ mod tests {
                 bit_length,
                 bits: None,
             }
-        } else if bit_length == 64 {
-            RoutingPrefix {
-                bit_length,
-                bits: Some(bits),
-            }
         } else {
-            let bits_aligned = (bits & ((1u64 << bit_length) - 1)) << (64 - bit_length);
+            let bits_aligned = (bits & ((1u64 << bit_length) - 1)) << (64 - bit_length); // Left-align bits
             RoutingPrefix {
                 bit_length,
                 bits: Some(bits_aligned),
@@ -179,7 +173,7 @@ mod tests {
             id: [id_value; 20],
             routing_prefix: RoutingPrefix {
                 bit_length: 8,
-                bits: Some(prefix_bits << (64 - 8)), // Align to higher bits
+                bits: Some(prefix_bits & 0xFF), // Align to lower bits
             },
             address: address.parse().unwrap(),
         }

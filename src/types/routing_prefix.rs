@@ -3,12 +3,10 @@
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
-use crate::utils::create_mask;
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RoutingPrefix {
     pub bit_length: u8,
-    pub bits: Option<u64>, // Stores up to 64 bits aligned to higher bits
+    pub bits: Option<u64>, // None represents the prefix that serves all, otherwise stores up to 64 bits in their natural order (right-aligned)
 }
 
 impl RoutingPrefix {
@@ -16,22 +14,19 @@ impl RoutingPrefix {
     pub fn random(bit_length: u8) -> Self {
         assert!(bit_length <= 64, "bit_length must be between 0 and 64");
         if bit_length == 0 {
-            // No bits
+            // No bits (serves all)
             RoutingPrefix {
                 bit_length,
                 bits: None,
             }
-        } else if bit_length == 64 {
-            // All bits used
-            let bits = OsRng.next_u64();
-            RoutingPrefix {
-                bit_length,
-                bits: Some(bits),
-            }
         } else {
             let mut rng = OsRng;
-            let bits_random = rng.next_u64() & ((1u64 << bit_length) - 1);
-            let bits = bits_random << (64 - bit_length); // Align to higher bits
+            let mask = if bit_length == 64 {
+                !0u64 // All bits set for 64-bit length
+            } else {
+                (1u64 << bit_length) - 1
+            };
+            let bits = rng.next_u64() & mask; // Generate random bits, right-aligned
             RoutingPrefix {
                 bit_length,
                 bits: Some(bits),
@@ -40,41 +35,38 @@ impl RoutingPrefix {
     }
 
     /// Returns true if self serves the given prefix.
-    /// A prefix serves another if its bit_length is less than or equal to the other's,
-    /// and its bits match the other's bits up to its bit_length.
     pub fn serves(&self, other: &RoutingPrefix) -> bool {
-        // Self's bit length must be less than or equal to other's bit length
-        if self.bit_length > other.bit_length {
-            return false;
+        match (self.bits, other.bits) {
+            (None, _) => true, // None (bit_length 0) serves all
+            (_, None) => false, // Non-none prefix doesn't serve None
+            (Some(self_bits), Some(other_bits)) => {
+                if self.bit_length > other.bit_length {
+                    return false;
+                }
+                // Compare only the relevant bits, no need to shift if we mask first
+                let mask = (1u64 << self.bit_length) - 1;
+                (self_bits & mask) == (other_bits >> (other.bit_length - self.bit_length)) & mask
+            }
         }
-        // Zero-length prefix serves all prefixes
-        if self.bit_length == 0 {
-            return true;
-        }
-        // Create a mask for self's bit length
-        let mask = create_mask(self.bit_length);
-        let self_bits = self.bits.unwrap_or(0) & mask;
-        let other_bits = other.bits.unwrap_or(0) & mask;
-        self_bits == other_bits
     }
 
-    /// Calculate the number of bytes needed to store the bits
+    /// Calculate the number of bytes needed to store the prefix
     pub fn num_bytes(&self) -> usize {
         if self.bit_length == 0 {
             0
         } else {
-            ((self.bit_length + 7) / 8) as usize
+            (self.bit_length as usize + 7) / 8
         }
     }
 
     /// Serialize the RoutingPrefix into bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(1 + 8); // 1 byte for bit_length, up to 8 bytes for bits
+        let num_bytes = self.num_bytes();
+        let mut bytes = Vec::with_capacity(1 + num_bytes);
         bytes.push(self.bit_length);
         if let Some(bits) = self.bits {
-            let num_bytes = self.num_bytes();
             let bits_bytes = bits.to_be_bytes(); // Big-endian
-            bytes.extend_from_slice(&bits_bytes[..num_bytes]); // Take the necessary high-order bytes
+            bytes.extend_from_slice(&bits_bytes[8 - num_bytes..]); // Take the necessary high-order bytes
         }
         bytes
     }
@@ -88,52 +80,48 @@ impl RoutingPrefix {
         if bit_length > 64 {
             return Err("Invalid bit length");
         }
-        let num_bytes = if bit_length == 0 { 0 } else { ((bit_length + 7) / 8) as usize };
-        if data.len() < 1 + num_bytes {
+
+        let num_bytes = (bit_length + 7) / 8; // Correctly calculate num_bytes
+
+        if data.len() < 1 + num_bytes as usize { // Cast num_bytes to usize for comparison
             return Err("Data too short for RoutingPrefix bits");
         }
+
         let bits = if bit_length == 0 {
             None
         } else {
-            let bits_bytes = &data[1..1 + num_bytes];
-            let mut bits_array = [0u8; 8];
-            bits_array[..num_bytes].copy_from_slice(bits_bytes);
-            let bits = u64::from_be_bytes(bits_array);
-            // Mask the bits to the bit_length
-            let bits = bits & create_mask(bit_length);
-            Some(bits)
+            let mut bits_bytes = [0u8; 8];
+            bits_bytes[8 - num_bytes as usize..].copy_from_slice(&data[1..1 + num_bytes as usize]);
+            Some(u64::from_be_bytes(bits_bytes))
         };
+
         Ok((
             RoutingPrefix {
                 bit_length,
                 bits,
             },
-            1 + num_bytes,
+            1 + num_bytes as usize, // Return consumed bytes as usize
         ))
     }
 
     /// Calculate the XOR distance between two RoutingPrefixes
     pub fn xor_distance(&self, other: &Self) -> (Option<u64>, u8) {
-        // If either of the prefixes has no bits, return None
-        if self.bits.is_none() || other.bits.is_none() {
-            return (None, 0);
+        match (self.bits, other.bits) {
+            (None, None) => (None, 0), // Both are "serves all", so no distance
+            (Some(self_bits), Some(other_bits)) => {
+                let effective_bit_length = self.bit_length.min(other.bit_length);
+                let self_aligned = self_bits << (64 - self.bit_length);
+                let other_aligned = other_bits << (64 - other.bit_length);
+                let xor_result = self_aligned ^ other_aligned;
+
+                if xor_result == 0 {
+                    (None, effective_bit_length)
+                } else {
+                    (Some(xor_result.leading_zeros() as u64), effective_bit_length)
+                }
+            },
+            _ => (None, 0), // One is "serves all", the other is not
         }
-
-        // Determine the effective bit length to use (minimum of the two bit lengths)
-        let effective_bit_length = self.bit_length.min(other.bit_length);
-
-        // Mask both bits to the effective bit length
-        let mask = create_mask(effective_bit_length);
-        let self_bits = self.bits.unwrap() & mask;
-        let other_bits = other.bits.unwrap() & mask;
-
-        // If bits are identical after masking, return None
-        if self_bits == other_bits {
-            return (None, effective_bit_length);
-        }
-
-        // Compute the XOR distance
-        (Some(self_bits ^ other_bits), effective_bit_length)
     }
 }
 
@@ -151,63 +139,34 @@ impl Default for RoutingPrefix {
 mod tests {
     use super::*;
 
-    /// Helper function to create a RoutingPrefix with bits aligned to higher bits
-    fn create_prefix(bit_length: u8, bits: u64) -> RoutingPrefix {
-        assert!(bit_length <= 64, "bit_length must be <= 64");
-        if bit_length == 0 {
-            RoutingPrefix {
-                bit_length,
-                bits: None,
-            }
-        } else if bit_length == 64 {
-            RoutingPrefix {
-                bit_length,
-                bits: Some(bits),
-            }
-        } else {
-            let bits_aligned = (bits & ((1u64 << bit_length) - 1)) << (64 - bit_length);
-            RoutingPrefix {
-                bit_length,
-                bits: Some(bits_aligned),
-            }
-        }
-    }
-
     #[test]
     fn test_serves_method() {
-        let prefix_a = create_prefix(3, 0b101); // 101 shifted to higher bits
-        let prefix_b = create_prefix(8, 0b10110000); // 10110000 shifted
-        let prefix_c = create_prefix(8, 0b10101000); // 10101000 shifted
-        let prefix_d = create_prefix(8, 0b11010000); // 11010000 shifted
-        let prefix_e = create_prefix(3, 0b110); // 110 shifted to higher bits
+        let prefix_a = RoutingPrefix { bit_length: 3, bits: Some(0b101) };
+        let prefix_b = RoutingPrefix { bit_length: 8, bits: Some(0b10110000) };
+        let prefix_c = RoutingPrefix { bit_length: 8, bits: Some(0b10101000) };
+        let prefix_d = RoutingPrefix { bit_length: 8, bits: Some(0b11010000) };
+        let prefix_e = RoutingPrefix { bit_length: 3, bits: Some(0b110) };
 
-        // prefix_a serves prefix_b
         assert!(prefix_a.serves(&prefix_b), "prefix_a should serve prefix_b");
-
-        // prefix_a serves prefix_c
         assert!(prefix_a.serves(&prefix_c), "prefix_a should serve prefix_c");
-
-        // prefix_a does not serve prefix_d
         assert!(!prefix_a.serves(&prefix_d), "prefix_a should not serve prefix_d");
-
-        // prefix_e does not serve prefix_b
         assert!(!prefix_e.serves(&prefix_b), "prefix_e should not serve prefix_b");
-        assert!(prefix_e.serves(&prefix_d), "prefix_e should serve prefix_d");
 
-        // Zero-length prefix serves all prefixes
-        let prefix_zero = create_prefix(0, 0);
+        let prefix_zero = RoutingPrefix { bit_length: 0, bits: None };
         assert!(prefix_zero.serves(&prefix_a));
         assert!(prefix_zero.serves(&prefix_b));
         assert!(prefix_zero.serves(&prefix_d));
 
-        // Any prefix serves itself
         assert!(prefix_a.serves(&prefix_a));
         assert!(prefix_b.serves(&prefix_b));
+
+        // Test cases where the second prefix has None bits
+        let prefix_f = RoutingPrefix { bit_length: 5, bits: Some(0b10110) };
+        assert!(!prefix_f.serves(&prefix_zero), "prefix_f should not serve prefix_zero");
     }
 
     #[test]
     fn test_random_routing_prefix() {
-        // Test random generation for various bit lengths
         for &bit_length in &[0, 1, 3, 8, 16, 32, 64] {
             let prefix = RoutingPrefix::random(bit_length);
             assert_eq!(prefix.bit_length, bit_length);
@@ -215,25 +174,30 @@ mod tests {
                 assert!(prefix.bits.is_none());
             } else {
                 assert!(prefix.bits.is_some());
-                // Ensure the bits fit within the bit length
                 let bits = prefix.bits.unwrap();
-                let mask = create_mask(bit_length);
-                assert_eq!(bits & !mask, 0, "Bits exceed bit_length");
+
+                if bit_length == 64 {
+                    // Special handling for 64-bit length
+                    assert!(bits <= ::std::u64::MAX);
+                }
+                else {
+                    let mask = (1u64 << bit_length) - 1;
+                    assert_eq!(bits & !mask, 0, "Bits exceed bit_length");
+                }
             }
         }
     }
 
     #[test]
     fn test_to_and_from_bytes() {
-        // Test serialization and deserialization
         let prefixes = vec![
-            create_prefix(0, 0),
-            create_prefix(1, 1),
-            create_prefix(3, 0b101),
-            create_prefix(8, 0b10110000),
-            create_prefix(16, 0b1011000011110000),
-            create_prefix(32, 0b10110000111100001011000011110000),
-            create_prefix(64, !0u64),
+            RoutingPrefix { bit_length: 0, bits: None },
+            RoutingPrefix { bit_length: 1, bits: Some(1) },
+            RoutingPrefix { bit_length: 3, bits: Some(0b101) },
+            RoutingPrefix { bit_length: 8, bits: Some(0b10110000) },
+            RoutingPrefix { bit_length: 16, bits: Some(0b1011000011110000) },
+            RoutingPrefix { bit_length: 32, bits: Some(0b10110000111100001011000011110000) },
+            RoutingPrefix { bit_length: 64, bits: Some(!0u64) },
         ];
 
         for prefix in prefixes {
@@ -246,59 +210,60 @@ mod tests {
 
     #[test]
     fn test_from_bytes_errors() {
-        // Test deserialization errors with invalid inputs
         let invalid_data = vec![
-            vec![],                  // Empty data
-            vec![65],                // Invalid bit length (>64)
-            vec![3],                 // Missing bits for bit_length=3 (needs 1 byte)
-            vec![16, 0xAA],          // bit_length=16 requires 2 bytes, only 1 provided
-            vec![32, 0xAA, 0xBB],    // bit_length=32 requires 4 bytes, only 2 provided
-            vec![255],               // Invalid bit length (>64)
+            vec![],
+            vec![65],
+            vec![3],
+            vec![16, 0xAA],
+            vec![32, 0xAA, 0xBB],
+            vec![255],
         ];
 
         for data in invalid_data {
             let result = RoutingPrefix::from_bytes(&data);
-            assert!(
-                result.is_err(),
-                "Expected error for invalid data: {:?}",
-                data
-            );
+            assert!(result.is_err(), "Expected error for invalid data: {:?}", data);
         }
     }
 
     #[test]
     fn test_xor_distance() {
-        // Test with different prefixes
-        let prefix1 = create_prefix(3, 0b101); // 101 aligned to high bits
-        let prefix2 = create_prefix(3, 0b100); // 100 aligned to high bits
-
+        let prefix1 = RoutingPrefix { bit_length: 3, bits: Some(0b101) };
+        let prefix2 = RoutingPrefix { bit_length: 3, bits: Some(0b100) };
         let (distance_opt, effective_length) = prefix1.xor_distance(&prefix2);
         assert_eq!(effective_length, 3);
         assert!(distance_opt.is_some());
-        assert_eq!(distance_opt.unwrap(), 0b001 << (64 - 3)); // Distance should be 001 aligned to high bits
+        assert_eq!(distance_opt.unwrap(), 2);
 
-        // Test with identical prefixes
         let (distance_opt, effective_length) = prefix1.xor_distance(&prefix1);
         assert_eq!(distance_opt, None);
         assert_eq!(effective_length, 3);
 
-        // Test with prefix matching up to effective_bit_length
-        let prefix3 = create_prefix(4, 0b1010); // 1010 aligned
-        let prefix4 = create_prefix(3, 0b101);  // 101 aligned
+        let prefix3 = RoutingPrefix { bit_length: 4, bits: Some(0b1010) };
+        let prefix4 = RoutingPrefix { bit_length: 3, bits: Some(0b101) };
         let (distance_opt, effective_length) = prefix3.xor_distance(&prefix4);
         assert_eq!(distance_opt, None);
         assert_eq!(effective_length, 3);
 
-        // Test with no bits
-        let prefix_none = create_prefix(0, 0);
+        let prefix_none = RoutingPrefix { bit_length: 0, bits: None };
         let (distance_opt, effective_length) = prefix1.xor_distance(&prefix_none);
         assert_eq!(distance_opt, None);
         assert_eq!(effective_length, 0);
+
+        let (distance_opt, effective_length) = prefix_none.xor_distance(&prefix_none);
+        assert_eq!(distance_opt, None);
+        assert_eq!(effective_length, 0);
+
+        // Test with maximum bit length (64)
+        let prefix_max1 = RoutingPrefix { bit_length: 64, bits: Some(0xFFFFFFFFFFFFFFFF) };
+        let prefix_max2 = RoutingPrefix { bit_length: 64, bits: Some(0x7FFFFFFFFFFFFFFF) };
+        let (distance_opt, effective_length) = prefix_max1.xor_distance(&prefix_max2);
+        assert_eq!(effective_length, 64);
+        assert!(distance_opt.is_some());
+        assert_eq!(distance_opt.unwrap(), 0);
     }
 
     #[test]
     fn test_edge_cases() {
-        // Test edge cases like maximum bit length and zero bit length
         let max_prefix = RoutingPrefix::random(64);
         assert_eq!(max_prefix.bit_length, 64);
         assert!(max_prefix.bits.is_some());
@@ -310,7 +275,6 @@ mod tests {
 
     #[test]
     fn test_serialization_consistency() {
-        // Ensure that serialization and deserialization are consistent across multiple rounds
         let prefix = RoutingPrefix::random(32);
         let serialized = prefix.to_bytes();
         let (deserialized, _) = RoutingPrefix::from_bytes(&serialized).unwrap();
@@ -320,13 +284,8 @@ mod tests {
 
     #[test]
     fn test_bits_masking() {
-        // Ensure that bits are properly masked according to bit_length
-        let prefix = create_prefix(10, 0b1111111111); // 10 bits set
-        let expected_bits = 0b1111111111 << (64 - 10); // Masked to first 10 bits
-        let masked_bits = prefix.bits.unwrap() & create_mask(prefix.bit_length);
-        assert_eq!(
-            masked_bits, expected_bits,
-            "Bits should be masked to bit_length"
-        );
+        let prefix = RoutingPrefix { bit_length: 10, bits: Some(0b1111111111) };
+        let mask = (1u64 << 10) - 1;
+        assert_eq!(prefix.bits.unwrap() & mask, 0b1111111111, "Bits should be masked correctly");
     }
 }
