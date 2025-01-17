@@ -57,7 +57,7 @@ impl Encryption {
         let r_a_times_one_time_point = &r_a_scalar * &recipient_one_time_point;
         let r_a_times_one_time_bytes = r_a_times_one_time_point.compress().to_bytes();
 
-        let mut hasher = Sha512::new();
+        let mut hasher = Sha512::default();
         hasher.update(r_a_times_one_time_bytes);
         let H_s_scalar = Scalar::from_hash(hasher);
 
@@ -132,7 +132,7 @@ impl Encryption {
         let k_a_R_a_point = k_a_scalar * R_a_point;
         let k_a_R_a_bytes = k_a_R_a_point.compress().to_bytes();
 
-        let mut hasher = Sha512::new();
+        let mut hasher = Sha512::default();
         hasher.update(k_a_R_a_bytes);
         let H_s_scalar = Scalar::from_hash(hasher);
 
