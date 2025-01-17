@@ -9,8 +9,7 @@ use crate::types::{
 
 /// The maximum number of nodes per k-bucket (k)
 const K: usize = 20;
-/// The maximum acceptable bucket index (nodes with a higher index are considered too far)
-const MAX_ACCEPTABLE_BUCKET_INDEX: usize = 58; // same as your old code
+
 
 /// Kademlia-like Routing Table, but using a tree-based distance.
 pub struct RoutingTable {
@@ -73,42 +72,24 @@ impl RoutingTable {
         // Get the tree distance
         let distance_opt = self.prefix.distance(&node_info.routing_prefix);
         match distance_opt {
-            None => {
-                // If for some reason distance is None, let's just treat it like bucket 0
-                // or skip it entirely. We'll skip it here:
-                let bucket = &mut self.k_buckets[0];
-                if let Some(pos) = bucket.nodes.iter().position(|n| n.id == node_info.id) {
-                    let node = bucket.nodes.remove(pos);
-                    bucket.nodes.push(node);
-                } else if bucket.nodes.len() < K {
-                    bucket.nodes.push(node_info);
-                } else {
-                    bucket.nodes.remove(0);
-                    bucket.nodes.push(node_info);
-                }
-            }
+            None => return, // Skip nodes with incompatible prefixes
             Some(distance) => {
-                let bucket_index = (distance + 1) as usize;
-
+                // The bucket index should reflect the distance in the tree
+                let bucket_index = distance as usize;
                 if bucket_index >= self.k_buckets.len() {
-                    // Out of range => ignore
-                    return;
-                }
-                // If it's bigger than MAX_ACCEPTABLE_BUCKET_INDEX, we drop it
-                if bucket_index > MAX_ACCEPTABLE_BUCKET_INDEX {
                     return;
                 }
 
                 let bucket = &mut self.k_buckets[bucket_index];
-
-                // Check if the node is already in the bucket
                 if let Some(pos) = bucket.nodes.iter().position(|n| n.id == node_info.id) {
+                    // Move to end if already present
                     let node = bucket.nodes.remove(pos);
                     bucket.nodes.push(node);
                 } else if bucket.nodes.len() < K {
+                    // Add if bucket not full
                     bucket.nodes.push(node_info);
                 } else {
-                    // If the bucket is full, remove the oldest, push the new
+                    // Replace oldest if bucket full
                     bucket.nodes.remove(0);
                     bucket.nodes.push(node_info);
                 }
@@ -150,10 +131,6 @@ mod tests {
     use crate::types::{node_info::NodeInfo, routing_prefix::RoutingPrefix};
 
     /// Helper function to create a prefix with certain bit_length/bits.
-    ///
-    /// This code used to do "left-align" bits for XOR logic. For a tree-based approach,
-    /// you might not actually want to shift them left. But we'll keep this function
-    /// for consistency with the existing tests.
     fn create_prefix(bit_length: u8, bits: u64) -> RoutingPrefix {
         assert!(bit_length <= 64);
         if bit_length == 0 {
@@ -162,12 +139,16 @@ mod tests {
                 bits: None,
             }
         } else {
-            // If you want it truly “tree-based,” you might store `bits & ((1 << bit_length) - 1)`
-            // right-aligned. The existing tests do something else, so we keep them intact.
-            let bits_aligned = (bits & ((1u64 << bit_length) - 1)) << (64 - bit_length);
+            // We'll mask the bits to ensure only the relevant bits are set
+            let mask = if bit_length == 64 {
+                u64::MAX
+            } else {
+                (1u64 << bit_length) - 1
+            };
+            let masked_bits = bits & mask;
             RoutingPrefix {
                 bit_length,
-                bits: Some(bits_aligned),
+                bits: Some(masked_bits),
             }
         }
     }
