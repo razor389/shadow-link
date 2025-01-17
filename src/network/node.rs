@@ -15,7 +15,7 @@ use crate::types::argon2_params::SerializableArgon2Params;
 use crate::types::message::Message;
 use crate::types::node_info::{generate_node_id, NodeId, NodeInfo, NodeInfoExtended};
 use crate::types::packet::Packet;
-use crate::types::routing_prefix::RoutingPrefix;
+use crate::types::routing_prefix::{PrefixDistance, RoutingPrefix};
 
 use super::dht::RoutingTable; 
 
@@ -318,7 +318,7 @@ impl Node {
                     let original_len = closest_nodes.len();
                     // Insert new nodes and resort
                     closest_nodes.extend(new_nodes);
-                    closest_nodes.sort_by_key(|n| n.routing_prefix.xor_distance(&target_prefix));
+                    closest_nodes.sort_by_key(|n| n.routing_prefix.distance(&target_prefix));
                     closest_nodes.truncate(20); // K = 20
 
                     if closest_nodes.len() > original_len {
