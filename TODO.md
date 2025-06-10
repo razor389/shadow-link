@@ -1,14 +1,25 @@
 # TODO
 
-- Add `address_book.rs` (not yet created) for the client to maintain contact details.
-- Implement periodic node honesty testing by both clients and nodes.
-- Consider adding support for group messages.
-- Can we improve routing prefix and dht structure? we'd like routing prefix 101 to represent 101...0 (with 61 trailing zeros) without having to take up 64 bits. can we improve routing / graph structure as well?
-- Should we use tower?
-- bounding concurrency in nodes -> limit number of open sockets
-- dht / routing prefix interface needs another layer of abstraction, so we don't break node /client etc if we redesign network
+Introduce a DHT / routing‐prefix abstraction layer
+Why: Lays the groundwork for safely evolving the network API (including routing‐prefix changes) without breaking client/node code.
 
----
+Improve routing‐prefix & DHT structure (compact “101…” → 101000…0)
+Why: Directly tied to the DHT abstraction above; once the interface is in place we can swap in a more efficient prefix representation.
+
+Bound node concurrency (limit number of open sockets)
+Why: Prevents resource exhaustion under load—critical for a robust test suite and real‐world runs.
+
+Implement periodic “honesty” testing for nodes & clients
+Why: Strengthens network health and lays the foundation for penalizing misbehavior.
+
+Add address_book.rs for client contact management
+Why: Important for UX and for keeping client code organized, but orthogonal to core routing.
+
+Evaluate using Tower
+Why: Could simplify middleware & backpressure but comes after nailing down our own abstractions.
+
+Support for group messages
+Why: A nice‐to‐have on top of the existing point‐to‐point messaging flow.
 
 ## Overview
 

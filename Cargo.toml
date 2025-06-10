@@ -25,12 +25,13 @@ env_logger = "0.10"
 zstd = "0.11"
 tokio = { version = "1", features = ["full"] }
 bs58 = "0.5"
-
+async-trait="0.1"
+clap = { version = "3.2", features = ["derive"] }
 
 [[bin]]
 name = "node"
-path = "src/bin/node.rs"
+path = "bin/node.rs"
 
 [[bin]]
 name = "client"
-path = "src/bin/client.rs"
+path = "bin/client.rs"

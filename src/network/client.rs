@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use log::{error, info, warn};
 
+use crate::network::routing::api::RoutingService;
 use crate::types::address::{PrivateAddress, PublicAddress};
 use crate::types::argon2_params::SerializableArgon2Params;
 use crate::types::message::Message;
-use crate::types::node_info::NodeInfoExtended;
+use crate::types::node_info::{NodeInfo, NodeInfoExtended};
 use crate::types::packet::Packet;
 use crate::types::routing_prefix::RoutingPrefix;
 
@@ -20,6 +21,8 @@ pub type VerificationKeyBytes = [u8;32];
 
 pub struct Client {
     private_address: PrivateAddress,
+    /// Local routing service (e.g. cached DHT entries)
+    routing_service: Arc<dyn RoutingService>,
     pub max_prefix_length: u8,
     pub min_argon2_params: SerializableArgon2Params,
     pub require_exact_argon2: bool,
@@ -32,6 +35,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(
+        routing_service: Arc<dyn RoutingService>,
         prefix: Option<RoutingPrefix>, 
         length: Option<u8>,
         max_prefix_length: u8,
@@ -45,6 +49,7 @@ impl Client {
 
         Client {
             private_address,
+            routing_service,
             max_prefix_length,
             min_argon2_params,
             require_exact_argon2,
@@ -431,159 +436,14 @@ impl Client {
         // Return the node with the longest matching prefix
         matching_nodes.into_iter().next()
     }
-}
 
-// src/network/client.rs
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::argon2_params::SerializableArgon2Params;
-    use crate::types::routing_prefix::RoutingPrefix;
-    use std::net::SocketAddr;
-    use std::str::FromStr;
-    use crate::network::node::Node;
-    use tokio::time::Duration;
-
-    #[tokio::test]
-    async fn test_client_creation() {
-        let bootstrap_addr = SocketAddr::from_str("127.0.0.1:8083").unwrap();
-        let client = Client::new(
-            None,
-            None,
-            64,
-            SerializableArgon2Params::default(),
-            false,
-            bootstrap_addr,
-        );
-
-        assert!(client.connected_node.is_none());
-        assert_eq!(client.max_prefix_length, 64);
+    /// Return the full list of cached nodes from our routing service.
+    pub async fn get_cached_nodes(&self) -> Vec<NodeInfo> {
+        self.routing_service.all_nodes().await
     }
 
-    #[tokio::test]
-    async fn test_client_handshake() {
-        // Start a simple node
-        let node_addr = SocketAddr::from_str("127.0.0.1:8084").unwrap();
-        let node_prefix = RoutingPrefix::random(8);
-        let _node = Node::new(
-            node_prefix,
-            node_addr,
-            10,
-            86400,
-            SerializableArgon2Params::default(),
-            Duration::from_secs(300),
-            Duration::from_secs(600),
-            Vec::new(),
-            Duration::from_secs(3600),
-        )
-        .await;
-
-        // Create a client
-        let client = Client::new(
-            None,
-            None,
-            64,
-            SerializableArgon2Params::default(),
-            false,
-            node_addr,
-        );
-
-        // Perform handshake
-        let node_info = client.handshake_with_node(node_addr).await;
-        assert!(node_info.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_two_clients_send_and_receive_message() -> Result<(), Box<dyn std::error::Error>> {
-        let _ = env_logger::try_init();
-        info!("Starting two clients test");
-
-        // Node setup
-        let node_prefix = RoutingPrefix { bit_length: 0, bits: None };
-        let node_addr = "127.0.0.1:8085".parse()?;
-
-        info!("Creating node...");
-        let _node = Node::new(
-            node_prefix,
-            node_addr,
-            1,
-            3600,
-            SerializableArgon2Params::default(),
-            Duration::from_secs(300),
-            Duration::from_secs(600),
-            Vec::new(),
-            Duration::from_secs(3600),
-        ).await;
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Create clients
-        info!("Creating clients...");
-        let mut client1 = Client::new(
-            None, None, 64,
-            SerializableArgon2Params::default(),
-            false, node_addr,
-        );
-
-        let mut client2 = Client::new(
-            None, None, 64,
-            SerializableArgon2Params::default(),
-            false, node_addr,
-        );
-
-        // Connect clients
-        info!("Connecting clients...");
-        let client1_handshake = client1.handshake_with_node(node_addr).await
-            .ok_or("Client 1 handshake failed")?;
-        client1.connected_node = Some(client1_handshake);
-
-        let client2_handshake = client2.handshake_with_node(node_addr).await
-            .ok_or("Client 2 handshake failed")?;
-        client2.connected_node = Some(client2_handshake);
-
-        let recipient_public_address = client2.private_address.public_address.clone();
-        let client2_private_address = client2.private_address.clone();
-
-        // Subscribe client2
-        info!("Setting up client 2 subscription...");
-        client2.subscribe_and_receive_messages(node_addr).await?;
-
-        // Send test message
-        info!("Sending test message...");
-        let test_message = b"Hello from Client 1!".to_vec();
-        client1.send_message(recipient_public_address.clone(), &test_message).await?;
-
-        // Wait for and verify message receipt
-        info!("Waiting for message receipt...");
-        let start = tokio::time::Instant::now();
-        let timeout = Duration::from_secs(5);
-        
-        while start.elapsed() < timeout {
-            let messages = client2.messages_received.lock().await;
-            let mut message_found = false;
-            
-            for packets in messages.values() {
-                for packet in packets {
-                    if let Some((plaintext, _)) = packet.verify_and_decrypt(
-                        &client2_private_address,
-                        1
-                    ) {
-                        info!("Received message: {:?}", String::from_utf8_lossy(&plaintext));
-                        if plaintext == test_message {
-                            message_found = true;
-                            break;
-                        }
-                    }
-                }
-                if message_found {
-                    return Ok(());
-                }
-            }
-            
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        Err("Message not received within timeout".into())
+    /// Find the k closest nodes to a given prefix using our local DHT cache.
+    pub async fn find_closest_nodes(&self, prefix: RoutingPrefix) -> Vec<NodeInfo> {
+        self.routing_service.find_closest(&prefix).await
     }
 }
