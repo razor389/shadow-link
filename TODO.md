@@ -1,11 +1,5 @@
 # TODO
 
-Introduce a DHT / routing‐prefix abstraction layer
-Why: Lays the groundwork for safely evolving the network API (including routing‐prefix changes) without breaking client/node code.
-
-Improve routing‐prefix & DHT structure (compact “101…” → 101000…0)
-Why: Directly tied to the DHT abstraction above; once the interface is in place we can swap in a more efficient prefix representation.
-
 Bound node concurrency (limit number of open sockets)
 Why: Prevents resource exhaustion under load—critical for a robust test suite and real‐world runs.
 
