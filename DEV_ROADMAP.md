@@ -60,6 +60,7 @@ This roadmap breaks down our prioritized TODO list into concrete development pha
 * **Task 3.1.1:** Abstract `TcpStream` to a `Transport` trait.
 * **Task 3.1.2:** Provide built-in transports: TLS+WebSocket, Shadowsocks, obfs4.
 * **Task 3.1.3:** CLI flags to select transport at runtime.
+* **Task 3.1.4:** Integrate onion-routing support by layering multi-hop circuits over the `Transport` trait (Tor-style encryption hops).
 
 ### Milestone 3.2: Bridge & Rendezvous
 

@@ -24,6 +24,8 @@
 8. **Pluggable Transports & Traffic Obfuscation**
    *Why:* Evade DPI and active probing; disguise traffic to look like standard HTTPS, Shadowsocks, or other innocuous protocols.
 
+   * **Onion Routing Option:** Integrate layered encryption hops (e.g. Tor-style circuits) over the transport to prevent intermediate peers from linking source and destination and further resist traffic analysis.
+
 9. **Bridge & Rendezvous Node Integration**
    *Why:* Provide out-of-band bootstrap paths when direct DHT is censored; leverage social trust for first contacts.
 
