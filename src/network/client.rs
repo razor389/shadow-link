@@ -216,43 +216,44 @@ impl Client {
         recipient_public_address: PublicAddress,
         message: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let connected_node = self.connected_node.as_ref()
+        let node = self.connected_node
+            .as_ref()
             .ok_or("No connected node")?;
 
-        // Create packet
-        let sender_public_address = &self.private_address.public_address;
+        // 1) Build the packet
         let packet = Packet::create_signed_encrypted(
             &self.private_address.verification_signing_key,
-            sender_public_address,
+            &self.private_address.public_address,
             &recipient_public_address,
             message,
-            connected_node.pow_difficulty,
-            connected_node.max_ttl,
-            self.min_argon2_params.max_params(&connected_node.min_argon2_params),
+            node.pow_difficulty,
+            node.max_ttl,
+            self.min_argon2_params.max_params(&node.min_argon2_params),
         );
 
-        // Connect to node
-        let mut stream = TcpStream::connect(connected_node.address).await?;
-        
-        // Perform handshake
-        let handshake = Message::ClientHandshake;
-        let data = bincode::serialize(&handshake)?;
-        stream.write_all(&data).await?;
-
-        // Await handshake response
-        let mut buffer = vec![0u8; 8192];
-        let n = stream.read(&mut buffer).await?;
-        
-        match bincode::deserialize(&buffer[..n])? {
-            Message::ClientHandshakeAck(_) => {
-                // Send packet
-                let message = Message::Packet(packet);
-                let data = bincode::serialize(&message)?;
-                stream.write_all(&data).await?;
-                Ok(())
+        // 2) *Hand-off* your handshake on one connection (so the node's loop sees it)
+        {
+            let mut hs = TcpStream::connect(node.address).await?;
+            let data = bincode::serialize(&Message::ClientHandshake)?;
+            hs.write_all(&data).await?;
+            let mut buf = vec![0; 4096];
+            let n = hs.read(&mut buf).await?;
+            let resp: Message = bincode::deserialize(&buf[..n])?;
+            if !matches!(resp, Message::ClientHandshakeAck(_)) {
+                return Err("Bad handshake ack".into());
             }
-            _ => Err("Unexpected handshake response".into())
+            // drop(hs) => node's handle_connection will loop around and see your next Subscribe or Packet
         }
+
+        // 3) Send the packet on a *new* connection (no handshake)
+        {
+            let mut conn = TcpStream::connect(node.address).await?;
+            let msg = Message::Packet(packet);
+            let data = bincode::serialize(&msg)?;
+            conn.write_all(&data).await?;
+        }
+
+        Ok(())
     }
 
     pub async fn disconnect(&mut self) {
@@ -445,5 +446,19 @@ impl Client {
     /// Find the k closest nodes to a given prefix using our local DHT cache.
     pub async fn find_closest_nodes(&self, prefix: RoutingPrefix) -> Vec<NodeInfo> {
         self.routing_service.find_closest(&prefix).await
+    }
+}
+
+// Only compiled when you run with `--features test_helpers`
+#[cfg(feature = "test_helpers")]
+impl Client {
+    /// Expose our PublicAddress for tests only
+    pub fn public_address_for_tests(&self) -> PublicAddress {
+        self.private_address.public_address.clone()
+    }
+
+    /// Expose a reference to our PrivateAddress for decryption in tests only
+    pub fn private_address_for_tests(&self) -> &PrivateAddress {
+        &self.private_address
     }
 }

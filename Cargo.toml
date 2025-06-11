@@ -35,3 +35,6 @@ path = "bin/node.rs"
 [[bin]]
 name = "client"
 path = "bin/client.rs"
+
+[features]
+test_helpers = []

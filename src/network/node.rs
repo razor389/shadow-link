@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::sync::broadcast::{self, Sender as BroadcastSender};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
-use log::{warn};
+use log::{info, warn};
 use tokio::time::{sleep, Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -187,59 +187,71 @@ impl Node {
         } else { None }
     }
 
-        /// Handle TCP handshake and messages
+    /// Accept incoming and outgoing messages
     async fn handle_connection(self: Arc<Self>, mut stream: TcpStream) {
         let peer = stream.peer_addr().unwrap_or(self.address);
-        // Early return if blacklisted
         if self.is_blacklisted(&peer.ip()).await {
             return;
         }
 
-        // Read incoming message
-        let mut buf = vec![0; 8192];
-        let n = match stream.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => return,
-        };
+        loop {
+            // read the next message
+            let mut buf = vec![0; 8192];
+            let n = match stream.read(&mut buf).await {
+                Ok(0) => return,              // client closed
+                Ok(n) => n,
+                Err(_)   => return,           // read error
+            };
 
-        // Deserialize protocol message
-        let msg: Message = match bincode::deserialize(&buf[..n]) {
-            Ok(m) => m,
-            Err(_) => {
-                self.blacklist_ip(&peer.ip()).await;
-                return;
-            }
-        };
+            let msg: Message = match bincode::deserialize(&buf[..n]) {
+                Ok(m) => m,
+                Err(_) => {
+                    self.blacklist_ip(&peer.ip()).await;
+                    return;
+                }
+            };
 
-        // Dispatch based on message type
-        match msg {
-            Message::ClientHandshake => {
-                let ack = Message::ClientHandshakeAck(self.get_node_info_extended());
-                let data = bincode::serialize(&ack).unwrap();
-                let _ = stream.write_all(&data).await;
-            }
-            Message::Handshake(ni) => {
-                self.update_routing_table_extended(ni.clone()).await;
-                let ack = Message::HandshakeAck(self.get_node_info_extended());
-                let data = bincode::serialize(&ack).unwrap();
-                let _ = stream.write_all(&data).await;
-            }
-            Message::Subscribe => {
-                // Spawn a separate task to handle subscription lifecycle
-                let me = self.clone();
-                let peer_addr = peer;
-                tokio::spawn(async move {
-                    me.handle_subscribe(peer_addr, stream).await;
-                });
-            }
-            Message::Unsubscribe => {
-                self.handle_unsubscribe(peer, stream).await;
-            }
-            other => {
-                self.handle_message(other, peer).await;
+            match msg {
+                // 1) Keep reading after a client handshake
+                Message::ClientHandshake => {
+                    let ack = Message::ClientHandshakeAck(self.get_node_info_extended());
+                    let _ = stream.write_all(&bincode::serialize(&ack).unwrap()).await;
+                    continue;
+                }
+
+                // 2) Same for internal node handshakes
+                Message::Handshake(ni) => {
+                    self.update_routing_table_extended(ni.clone()).await;
+                    let ack = Message::HandshakeAck(self.get_node_info_extended());
+                    let _ = stream.write_all(&bincode::serialize(&ack).unwrap()).await;
+                    continue;
+                }
+
+                // 3) When a client subscribes, hand the socket off to handle_subscribe
+                Message::Subscribe => {
+                    let me = self.clone();
+                    let peer_addr = peer;
+                    tokio::spawn(async move {
+                        me.handle_subscribe(peer_addr, stream).await;
+                    });
+                    return;
+                }
+
+                // 4) Unsubscribe is also long-lived
+                Message::Unsubscribe => {
+                    self.handle_unsubscribe(peer, stream).await;
+                    return;
+                }
+
+                // 5) Anything else is a one-off RPC or packet
+                other => {
+                    self.handle_message(other, peer).await;
+                    return;
+                }
             }
         }
     }
+    
     /// Dispatch protocol messages    /// Dispatch protocol messages
     async fn handle_message(&self,msg:Message,sender:SocketAddr){
         match msg{
@@ -285,6 +297,9 @@ impl Node {
 
     /// Process and forward a packet
     async fn handle_packet(&self,packet:Packet,sender:SocketAddr){
+        info!("Node prefix: {:?}, Packet prefix: {:?}, Serves: {}", 
+            self.prefix, packet.routing_prefix, 
+            self.prefix.serves(&packet.routing_prefix));
         if self.packet_store.lock().await.contains_key(&packet.pow_hash){ return; }
         if packet.ttl>self.max_ttl{ self.blacklist_ip(&sender.ip()).await; return; }
         if !packet.argon2_params.meets_min(&self.min_argon2_params){ self.blacklist_ip(&sender.ip()).await; return; }
