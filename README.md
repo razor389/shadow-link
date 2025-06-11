@@ -124,12 +124,6 @@ Optional flags mirror node settings for parameter matching and prefix search.
 
 ---
 
-## Configuration
-
-Settings can be passed via CLI flags or environment variables. See [`src/config.rs`](src/config.rs) for defaults.
-
----
-
 ## Development Roadmap
 
 See [DEV\_ROADMAP.md](DEV_ROADMAP.md) for planned features and milestones.
