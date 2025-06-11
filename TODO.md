@@ -1,58 +1,134 @@
 # TODO
 
-1. **Bound Node Concurrency (limit open sockets)**
-   *Why:* Prevent resource exhaustion under high load; ensures stability in both test environments and real-world deployments.
+This TODO list summarizes key development milestones aligned with the full Development Roadmap phases.
 
+## Phase 1: Core Scalability & Stability (Months 1–3)
+
+1. **Limit Resources & Protect Under Load**
+
+   * Implement connection semaphores (`tokio::sync::Semaphore`).
+   * Integration tests for high-volume socket caps.
 2. **Persistent & Multiplexed Connections**
-   *Why:* Amortize TCP/QUIC handshakes, reduce latency, and enable NAT traversal for global-scale mesh networks.
 
-3. **Adaptive PoW Parameter Tuning & Lightweight Filtering**
-   *Why:* Balance spam prevention with throughput; reject invalid packets before performing expensive crypto.
+   * Framed protocol (`LengthDelimitedCodec`) over persistent channels.
+   * Connection pool or multiplexed channel for `TcpStream`.
+   * Benchmark handshake vs. throughput.
+3. **Adaptive PoW & Pre-Filter**
 
+   * Header/TTL/Argon2 pre-checks.
+   * Dynamic difficulty adjustment.
+   * Edge-case unit tests.
 4. **Rate Limiting & Backpressure**
-   *Why:* Protect nodes from flash crowds and DoS by throttling forwards and subscription broadcasts.
 
-5. **Disk‑Backed Packet Store & Node State Persistence**
-   *Why:* Ensure message durability across restarts, bound memory usage, and support offline delivery.
+   * Per-peer token/leaky bucket.
+   * Backpressure signals (e.g., `Message::Busy`).
+   * Prometheus metrics for queue lengths.
 
-6. **DHT Bucket Maintenance & Parallel Lookups**
-   *Why:* Maintain routing table health under churn and accelerate lookups in large-scale networks.
+## Phase 2: Persistence, DHT Resilience & Security (Months 3–8)
 
-7. **Periodic Honesty Testing for Nodes & Clients**
-   *Why:* Monitor protocol compliance, detect misbehavior, and lay groundwork for reputation or penalty mechanisms.
+5. **Disk‑Backed Packet Store**
 
-8. **Pluggable Transports & Traffic Obfuscation**
-   *Why:* Evade DPI and active probing; disguise traffic to look like standard HTTPS, Shadowsocks, or other innocuous protocols.
+   * Integrate RocksDB/sled.
+   * Hybrid LRU + persistent cache.
+   * Graceful shutdown and startup load.
+6. **DHT Bucket Maintenance**
 
-   * **Onion Routing Option:** Integrate layered encryption hops (e.g. Tor-style circuits) over the transport to prevent intermediate peers from linking source and destination and further resist traffic analysis.
+   * Kademlia bucket refresh.
+   * Eviction policies and churn simulation.
+7. **Periodic Honesty Tests**
 
-9. **Bridge & Rendezvous Node Integration**
-   *Why:* Provide out-of-band bootstrap paths when direct DHT is censored; leverage social trust for first contacts.
+   * Ping + proof challenge protocols.
+   * Reputation scoring and penalties.
+8. **Storage Economics**
 
-10. **Cover Traffic & Mixing**
-    *Why:* Even with shadow addressing and broadcast dissemination, passive observers can still profile the network by monitoring message timing, volume, and relay patterns. Without cover traffic, an attacker can:
+   * Enforce quotas and automatic pruning.
+   * Proof-of-storage checks.
+   * Bandwidth/storage metrics.
+9. **Core Security Hardening**
 
-    * **Timing Correlation:** Observe when a new packet appears in the network and correlate it with a client’s send event to infer sender identity.
-    * **Volume Analysis:** Track spikes in overall traffic or per-prefix message counts to detect communication bursts or identify high-activity users.
-    * **Sequence Patterns:** Follow the propagation order of packets across nodes; if certain nodes consistently relay specific messages sooner, they can be linked to origin or destination.
-    * **Intersection Attacks:** Over multiple rounds, intersect sets of active prefixes or subscribers to narrow down which clients are communicating.
+   * Perfect forward secrecy and key rotation.
+   * Secure key deletion.
+   * Duress/panic-button codes.
+10. **Operational Security**
 
-    *Mitigation:* Inject dummy packets at randomized intervals, batch real messages into fixed-size windows, and add random delays before forwarding. This masks real traffic patterns and breaks direct timing/volume correlations.
+    * Secure wipe and hidden volumes.
+    * Duress passwords and safe-mode.
+    * Emergency protocols for partitioning and compromise.
+11. **Sybil Resistance**
 
-11. **Address Book & UX Enhancements (address\_book.rs)**
-    *Why:* Simplify key management, contact workflows, and improve user adoption.
+    * PoW‑tied node IDs.
+    * Distributed admission protocols.
+    * Optional staking for identity.
 
-12. **Support for Group Messaging**
-    *Why:* Extend beyond one-to-one; valuable once core routing and privacy features are stable.
+## Phase 3: Censorship Resistance & Resilience (Months 8–15)
 
-13. **Evaluate Using Tower**
-    *Why:* Consider after establishing custom backpressure abstractions to simplify middleware and service composition.
+12. **Transport Evaluation & Partnerships**
 
-14. **CLI → GUI / Mobile Client Wrappers**
-    *Why:* Lower barrier for non-technical users, especially in adversarial environments.
+    * Assess Tor PT, Lantern.
+    * Define transport interfaces.
+    * Establish collaboration framework.
+13. **Pluggable Transports**
 
-15. **Security Audit & Formal Verification**
-    *Why:* Validate cryptographic and protocol correctness before large-scale deployment.
+    * Abstract `Transport` trait.
+    * TLS+WebSocket, Shadowsocks, obfs4.
+    * Onion-routing integration.
+14. **Bridge & Rendezvous**
 
-16. **Operational Monitoring & Governance Tools**
-    *Why:* Detect misbehaving nodes, monitor network health, and enable long-term maintenance.
+    * Out-of-band bootstrap (email/SMS/QR).
+    * TOFU key pinning.
+    * Offline bridge tutorials.
+15. **Cover Traffic & Mixing**
+
+    * Dummy-packet injection.
+    * Batch + random delays.
+    * Adversarial leakage analysis.
+16. **Advanced Circumvention**
+
+    * Domain-fronting.
+    * Traffic morphing (HTTPS/video).
+    * CDN-based obfuscation.
+    * Decoy patterns.
+17. **DTN & Mesh Networking**
+
+    * Delay-Tolerant Networking.
+    * Sneakernet (USB bundles).
+    * LAN mesh fallback.
+18. **Advanced Metadata Protection**
+
+    * Constant-rate shaping.
+    * Fixed-size padding.
+    * Receiver anonymity sets.
+
+## Phase 4: UX, Group Features & Governance (Months 15–18)
+
+19. **Address Book & UX**
+
+    * `address_book.rs` API.
+    * CLI commands: add/list/remove.
+    * Persistence format tests.
+20. **Group Messaging (Experimental)**
+
+    * Group-prefix conventions.
+    * Multicast routing (feature-flagged).
+    * PoW/auth metadata.
+21. **Tower Integration**
+
+    * DHT RPC as Tower `Service`.
+    * Middleware vs. custom comparison.
+22. **Monitoring & Governance**
+
+    * Prometheus & Grafana.
+    * Governance policy definitions.
+
+## Phase 5 & 6: Formal Verification, Adversarial Testing & Ecosystem (Months 19–30)
+
+23. **Security Audit & Formal Verification**
+
+    * External firm review.
+    * TLA+/Rust invariants.
+    * Red‑team testing.
+24. **GUI/Mobile Clients & Ecosystem**
+
+    * JSON‑RPC/WebSocket APIs.
+    * Electron/React Native prototypes.
+    * Bounty programs & public tracker.
