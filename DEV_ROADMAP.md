@@ -1,6 +1,6 @@
 # Development Roadmap
 
-This roadmap breaks down our prioritized TODO list into concrete development phases, milestones, and tasks. Timeline estimates assume a small dedicated team.
+This roadmap breaks down our prioritized TODO list into concrete development phases, milestones, and tasks.
 
 ---
 

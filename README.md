@@ -126,7 +126,7 @@ Optional flags mirror node settings for parameter matching and prefix search.
 
 ## Development Roadmap
 
-See [DEV\_ROADMAP.md](DEV_ROADMAP.md) for planned features and milestones.
+See [TODO.md](TODO.md) or the more detailed [DEV\_ROADMAP.md](DEV_ROADMAP.md) for planned features and milestones.
 
 ---
 
