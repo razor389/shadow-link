@@ -62,6 +62,7 @@ async fn single_node_loopback() {
         SerializableArgon2Params::default(),
         false,     // exact argon2 not required
         node_addr, // bootstrap node addr
+        0,         // min PoW difficulty
     );
 
     info!(
@@ -180,6 +181,7 @@ async fn two_node_relay() {
         SerializableArgon2Params::default(),
         false,
         addr_a,
+        0,
     );
 
     info!(
@@ -207,6 +209,7 @@ async fn two_node_relay() {
         SerializableArgon2Params::default(),
         false,
         addr_b,
+        0,
     );
 
     info!(

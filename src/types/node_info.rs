@@ -11,9 +11,9 @@ pub type NodeId = [u8; 20]; // 160-bit node ID
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NodeInfo {
-    pub id: NodeId,                     // Node ID (160-bit hash)
-    pub routing_prefix: RoutingPrefix,  // Routing Prefix served by node
-    pub address: SocketAddr,            // Node's network address
+    pub id: NodeId,                    // Node ID (160-bit hash)
+    pub routing_prefix: RoutingPrefix, // Routing Prefix served by node
+    pub address: SocketAddr,           // Node's network address
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,6 +24,7 @@ pub struct NodeInfoExtended {
     pub pow_difficulty: usize,
     pub max_ttl: u64,
     pub min_argon2_params: SerializableArgon2Params,
+    pub verifying_key: [u8; 32],
 }
 
 /// Generates a node ID by hashing the socket address and routing prefix

@@ -73,6 +73,14 @@ async fn main() {
                 .value_parser(value_parser!(u32)),
         )
         .arg(
+            Arg::new("min_pow_difficulty")
+                .long("min-pow")
+                .value_name("NUMBER")
+                .help("Minimum PoW difficulty for accepted packets")
+                .default_value("0")
+                .value_parser(value_parser!(usize)),
+        )
+        .arg(
             Arg::new("require_exact_argon2")
                 .long("exact-argon2")
                 .help("Require nodes to have exact Argon2 parameters")
@@ -113,6 +121,10 @@ async fn main() {
         output_length: Some(32),
     };
 
+    let min_pow_difficulty = *matches
+        .get_one::<usize>("min_pow_difficulty")
+        .expect("Min PoW difficulty has a default");
+
     let require_exact_argon2 = matches.get_flag("require_exact_argon2");
 
     // Inject a routing service based on DHT
@@ -128,6 +140,7 @@ async fn main() {
         min_argon2_params,
         require_exact_argon2,
         bootstrap_node_address,
+        min_pow_difficulty,
     );
 
     // Kick off subscription and message processing
