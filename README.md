@@ -124,6 +124,16 @@ Optional flags mirror node settings for parameter matching and prefix search.
 
 ---
 
+## Known Issues & Risks
+
+- `src/network/node.rs:235` – Client handshakes remain unauthenticated; any peer can subscribe or inject packets after sending `Message::ClientHandshake`, leaving the DHT vulnerable to spoofed clients.
+- `src/network/node.rs:370` – Packet forwarding enforces only the local node’s PoW threshold; relays ignore each peer’s advertised difficulty, so underpowered packets can still be propagated toward lax neighbors.
+- `src/network/node.rs:364` – Subscription fan-out serializes stored packets to every subscriber without backpressure; one slow client can block the broadcast loop and exhaust resources.
+- `src/network/client.rs:331` – The subscription loop warns on unexpected frames but never closes the stream, so malformed traffic can trigger infinite logging and leaked tasks.
+- `tests/integration_tests.rs:57` – Integration tests always run with `min_pow_difficulty = 0`, leaving the new PoW floor untested; regressions could slip through unnoticed.
+
+---
+
 ## Development Roadmap
 
 See [TODO.md](TODO.md) or the more detailed [DEV\_ROADMAP.md](DEV_ROADMAP.md) for planned features and milestones.
